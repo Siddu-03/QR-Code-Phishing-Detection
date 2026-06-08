@@ -27,7 +27,7 @@ Team will build a standalone Computer Vision Engine for QR Code Phishing Defacem
 |--------|--------|
 | Shikha Tiwari | shikhu112003@gmail.com |
 | Ullas Gowda R | gowdaullasr@gmail.com |
-| [Nikhil Savanth K M | nikhilsavanth71@gmail.com |
+| Nikhil Savanth K M | nikhilsavanth71@gmail.com |
 | Siddeshwarprasad K R | siddeshwarprasadkr@gmail.com |
 
 ---
