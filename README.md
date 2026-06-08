@@ -1,65 +1,34 @@
 ````md
-# Intelligent QR Code Phishing Detection Using AI and Threat Intelligence
+# Computer Vision & Graphic Tamper Detection for QR Code Phishing 
 
 ## Overview
 
-This project aims to develop an intelligent system capable of detecting phishing attacks delivered through QR codes (Quishing). The system combines QR code analysis, URL feature extraction, threat intelligence feeds, and machine learning techniques to classify QR-linked destinations as Safe, Suspicious, or Malicious.
+Team will build a standalone Computer Vision Engine for QR Code Phishing Defacement Detection. This system works strictly within the offline image domain. Instead of just extracting text, the engine treats the image as a digital forensic artifact. It parses the graphic structure to detect edge disparities, visual masking layers, perspective skewing, and noise changes that indicate a malicious sticker has been overlaid onto a real QR code. The system decodes the text string but flags the file with a comprehensive visual integrity risk assessment. 
 
 ---
 
 ## Project Guide
 
-**Guide Name:** [Guide Name]
+**Guide Name:** Dr. Manish Kumar
 
-**Designation:** [Designation]
+**Designation:** Assistant Professor
 
 **Department:** School of Computer Science and Engineering
 
 **Institution:** RV University
 
-**Email:** [Guide Email]
+**Email:** manish@rvu.edu.in
 
 ---
 
 ## Team Members
 
-| Name | Role | Email |
-|--------|--------|--------|
-| [Member 1 Name] | QR Processing & URL Extraction | [member1@email.com] |
-| [Member 2 Name] | Threat Intelligence | [member2@email.com] |
-| [Member 3 Name] | Machine Learning & Feature Engineering | [member3@email.com] |
-| [Member 4 Name] | Backend & Dashboard Integration | [member4@email.com] |
-
----
-
-## Objectives
-
-- Extract URLs from QR codes
-- Analyze URL and domain characteristics
-- Integrate threat intelligence sources
-- Apply machine learning for phishing detection
-- Generate risk scores for scanned QR codes
-- Provide an easy-to-use dashboard for analysis and reporting
-
----
-
-## Repository Structure
-
-```text
-src/
-├── qr_decoder/
-├── threat_intelligence/
-├── feature_extraction/
-├── ml_model/
-└── backend_ui/
-
-docs/
-├── literature-survey/
-└── architecture/
-
-data/
-tests/
-```
+| Name | Email |
+|--------|--------|
+| Shikha Tiwari | shikhu112003@gmail.com |
+| Ullas Gowda R | gowdaullasr@gmail.com |
+| [Nikhil Savanth K M | nikhilsavanth71@gmail.com |
+| Siddeshwarprasad K R | siddeshwarprasadkr@gmail.com |
 
 ---
 
