@@ -1,13 +1,6 @@
 """
 qr_detector.py
 ==============
-QR Code Detection Module — Week 1: QR Tamper Detection Project
-
-Detects QR codes from image files and returns decoded data together with
-coordinates in three standardised formats (corner_points, bbox_tuple,
-bbox_dict) ready for consumption by visualisation and future tamper-
-detection modules.
-
 Detection pipeline
 ------------------
 1. Try OpenCV QRCodeDetector (fast, handles single & multi-QR images).
@@ -66,7 +59,7 @@ from pyzbar import pyzbar
 
 # ---------------------------------------------------------------------------
 # Logging
-# ---------------------------------------------------------------------------
+ # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
