@@ -38,7 +38,7 @@ from typing import Optional
 import cv2
 
 # Member 1 – Image Loader
-from image_loader import (
+from src.image_loader.image_loader import (
     load_image,
     ImageLoaderError,
     InvalidFileError,
@@ -47,7 +47,7 @@ from image_loader import (
 )
 
 # Member 2 – QR Detector
-from qr_detector import (
+from src.qr_detector.qr_detector import (
     detect_qr,
     save_results_json,
 )
@@ -55,7 +55,7 @@ from qr_detector import (
 # Member 3 – Visualisation  (draw_box.py exposes its logic as a script;
 #             we replicate the visualisation call using cv2 as it does,
 #             but driven by real detection data rather than hard-coded values)
-import draw_box  # imported for awareness; actual cv2 calls mirror its approach
+import src.visualization.draw_box as draw_box  # imported for awareness; actual cv2 calls mirror its approach
 
 # ---------------------------------------------------------------------------
 # Logging
