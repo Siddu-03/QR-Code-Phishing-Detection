@@ -220,8 +220,8 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
 
     print("✅ Camera opened. Press 'q' to quit.")
 
-    # Tracks last-printed bbox per decoded QR string to avoid console spam.
-    last_seen: dict[str, tuple[int, int, int, int]] = {}
+    # Tracks decoded content of QR codes currently visible on screen.
+    seen_codes: set[str] = set()
 
     try:
         while True:
@@ -238,17 +238,17 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
 
             if result["detected"]:
                 draw_detections(frame, result)
-                current_seen: dict[str, tuple[int, int, int, int]] = {}
+                current_codes: set[str] = set()
                 for det in result["detections"]:
-                    bbox = tuple(det["bbox_tuple"])
                     data = det["data"]
-                    current_seen[data] = bbox
-                    if last_seen.get(data) != bbox:
+                    bbox = tuple(det["bbox_tuple"])
+                    current_codes.add(data)
+                    if data not in seen_codes:
                         print(f"[QR] {data!r}  bbox={bbox}  "
                               f"detector={result['detector_used']}")
-                last_seen = current_seen
+                seen_codes = current_codes
             else:
-                last_seen = {}
+                seen_codes = set()
 
             draw_status(frame, result)
             cv2.imshow("Live QR Scan", frame)
