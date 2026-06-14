@@ -4,16 +4,24 @@ live_scan.py
 Live webcam QR scanning module.
 
 Reuses the existing project pipeline:
-    - src.qr_detector.qr_detector  : detect_qr_opencv, detect_qr_pyzbar,
-                                      convert_coordinates (same detection
-                                      + coordinate logic as detect_qr())
-    - src.visualization.draw_box   : same drawing style (semi-transparent
-                                      overlay, border rectangle, coordinate
-                                      label) replicated for live frames
+    - src.qr_detector.qr_detector    : detect_qr_opencv, detect_qr_pyzbar,
+                                        convert_coordinates (same detection
+                                        + coordinate logic as detect_qr())
+    - src.qr_detector.qr_enhancement : auto_enhance() — Week 2 pre-processing
+                                        layer applied to every frame before
+                                        QR detection
+    - src.visualization.draw_box     : same drawing style (semi-transparent
+                                        overlay, border rectangle, coordinate
+                                        label) replicated for live frames
 
 No detection or visualisation logic is rewritten — frame-level detection
 calls the same OpenCV/pyzbar functions used by qr_detector.detect_qr(),
 and frame-level drawing mirrors draw_box.py's overlay/rectangle/label style.
+
+Frame pipeline (per captured frame)
+------------------------------------
+    raw frame  →  auto_enhance()  →  enhanced frame  →  detect_qr_frame()
+               →  draw_detections() / draw_status()  →  cv2.imshow()
 
 Usage
 -----
@@ -37,6 +45,9 @@ from src.qr_detector.qr_detector import (
     detect_qr_pyzbar,
     convert_coordinates,
 )
+
+# Week 2 enhancement layer — applied to every frame before detection
+from src.qr_detector.qr_enhancement import auto_enhance
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -175,12 +186,16 @@ def draw_detections(frame: np.ndarray, result: dict) -> np.ndarray:
     return frame
 
 
-def draw_status(frame: np.ndarray, result: dict) -> np.ndarray:
-    """Overlay a status line (detector used, QR count) on *frame*."""
+def draw_status(frame: np.ndarray, result: dict, enhancement_technique: str = "none") -> np.ndarray:
+    """Overlay a status line (detector used, QR count, enhancement) on *frame*."""
     if result["detected"]:
-        status = f"Detector: {result['detector_used']} | QR codes: {result['count']}"
+        status = (
+            f"Detector: {result['detector_used']} | "
+            f"QR codes: {result['count']} | "
+            f"Enhance: {enhancement_technique}"
+        )
     else:
-        status = "Detector: none | No QR detected"
+        status = f"Detector: none | No QR detected | Enhance: {enhancement_technique}"
 
     cv2.putText(
         frame, status, (10, 25),
@@ -200,11 +215,12 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
     --------
     1. Open webcam (``camera_index``).
     2. Capture frame.
-    3. Detect QR codes (reusing existing detection functions).
-    4. Draw bounding boxes + labels (draw_box.py style).
-    5. Show status (detector used, QR count).
-    6. Display live feed.
-    7. Repeat until 'q' is pressed.
+    3. Enhance frame via ``auto_enhance()`` (Week 2 pre-processing layer).
+    4. Detect QR codes on the enhanced frame (reusing existing detection functions).
+    5. Draw bounding boxes + labels on the **original** frame (draw_box.py style).
+    6. Show status (detector used, QR count, enhancement technique).
+    7. Display live feed.
+    8. Repeat until 'q' is pressed.
 
     Returns
     -------
@@ -230,11 +246,32 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
                 logger.warning("Frame capture failed; skipping frame.")
                 continue
 
+            # ── Step 3: Enhance frame before detection ───────────────────────
+            # try_rotation=False: rotation changes canvas dimensions, making
+            # bounding-box coordinates from the enhanced frame incompatible
+            # with the original frame that is displayed to the user.
             try:
-                result = detect_qr_frame(frame)
+                enh = auto_enhance(
+                    frame,
+                    try_rotation=False,
+                    try_low_light=True,
+                    try_blur=True,
+                    try_contrast=True,
+                )
+                enhanced_frame = enh.enhanced_image
+                enhancement_technique = enh.technique
+            except Exception as exc:  # noqa: BLE001 - keep stream alive
+                logger.warning("Enhancement failed, falling back to raw frame: %s", exc)
+                enhanced_frame = frame
+                enhancement_technique = "none"
+
+            # ── Step 4: Detect QR codes on the enhanced frame ────────────────
+            try:
+                result = detect_qr_frame(enhanced_frame)
             except Exception as exc:  # noqa: BLE001 - keep stream alive
                 logger.exception("Unexpected detection error: %s", exc)
                 result = {"detected": False, "count": 0, "detector_used": "none", "detections": []}
+                enhancement_technique = "none"
 
             if result["detected"]:
                 draw_detections(frame, result)
@@ -250,7 +287,7 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
             else:
                 seen_codes = set()
 
-            draw_status(frame, result)
+            draw_status(frame, result, enhancement_technique)
             cv2.imshow("Live QR Scan", frame)
 
             if cv2.waitKey(1) & 0xFF == EXIT_KEY:
