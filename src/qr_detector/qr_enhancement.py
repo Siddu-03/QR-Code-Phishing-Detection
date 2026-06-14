@@ -335,7 +335,7 @@ def enhance_rotated_qr(
             best_angle = angle
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    logger.info(
+    logger.debug(
         "enhance_rotated_qr — best angle=%.1f° (score=%.2f)  [%.1f ms]",
         best_angle, best_score, elapsed_ms,
     )
@@ -434,7 +434,7 @@ def enhance_low_light_qr(
     enhanced = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    logger.info(
+    logger.debug(
         "enhance_low_light_qr — CLAHE applied "
         "(clip=%.1f, tile=%s, gamma=%s)  [%.1f ms]",
         clip_limit, tile_grid_size, gamma, elapsed_ms,
@@ -563,7 +563,7 @@ def enhance_blurred_qr(
         sharpened = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    logger.info(
+    logger.debug(
         "enhance_blurred_qr — unsharp mask applied "
         "(denoise_k=%d, strength=%.2f, sigma=%.2f, binarise=%s)  [%.1f ms]",
         denoise_ksize, sharpen_strength, sharpen_sigma,
@@ -636,7 +636,7 @@ def enhance_contrast_qr(
     enhanced = cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    logger.info(
+    logger.debug(
         "enhance_contrast_qr — linear correction (α=%.2f, β=%d)  [%.1f ms]",
         alpha, beta, elapsed_ms,
     )
@@ -715,7 +715,7 @@ def enhance_sharpness_qr(
     sharpened = cv2.filter2D(image, -1, kernel)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    logger.info(
+    logger.debug(
         "enhance_sharpness_qr — kernel=%s  [%.1f ms]", kernel_type, elapsed_ms
     )
 
@@ -946,7 +946,7 @@ def auto_enhance(
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
     if best_result is None:
-        logger.info(
+        logger.debug(
             "auto_enhance — no enhancement improved the image; "
             "returning raw (score=%.2f)  [%.1f ms]",
             baseline_score, elapsed_ms,
@@ -958,7 +958,7 @@ def auto_enhance(
             elapsed_ms=elapsed_ms,
         )
 
-    logger.info(
+    logger.debug(
         "auto_enhance — best technique='%s' (score=%.2f > baseline=%.2f)  "
         "[%.1f ms total]",
         best_result.technique, best_score, baseline_score, elapsed_ms,
