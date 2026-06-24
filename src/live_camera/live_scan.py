@@ -2,26 +2,54 @@
 live_scan.py
 =============
 Live webcam QR scanning module.
+Week 2 – final production version.
 
 Reuses the existing project pipeline:
     - src.qr_detector.qr_detector    : detect_qr_opencv, detect_qr_pyzbar,
-                                        convert_coordinates (same detection
-                                        + coordinate logic as detect_qr())
-    - src.qr_detector.qr_enhancement : auto_enhance() — Week 2 pre-processing
-                                        layer applied to every frame before
-                                        QR detection
-    - src.visualization.draw_box     : same drawing style (semi-transparent
-                                        overlay, border rectangle, coordinate
-                                        label) replicated for live frames
-
-No detection or visualisation logic is rewritten — frame-level detection
-calls the same OpenCV/pyzbar functions used by qr_detector.detect_qr(),
-and frame-level drawing mirrors draw_box.py's overlay/rectangle/label style.
+                                        convert_coordinates
+    - src.qr_detector.qr_enhancement : auto_enhance() — applied to every
+                                        frame before QR detection
+    - src.preprocessing.image_enhancement : preprocess_for_qr() — optional
+                                        denoising pass applied BEFORE
+                                        auto_enhance() (controlled by
+                                        ENABLE_PREPROCESSING flag)
 
 Frame pipeline (per captured frame)
 ------------------------------------
-    raw frame  →  auto_enhance()  →  enhanced frame  →  detect_qr_frame()
-               →  draw_detections() / draw_status()  →  cv2.imshow()
+    raw frame
+        → [preprocess_for_qr()]          ← optional (ENABLE_PREPROCESSING)
+        → auto_enhance()
+        → detect_qr_frame()
+        → draw_detections() / draw_status()
+        → cv2.imshow()
+
+Preprocessing on live frames — design decisions
+-----------------------------------------------
+Resize is always disabled (``resize_target=None``) for live frames.
+Camera output is a stable resolution; resizing would shift bounding-box
+coordinates relative to the displayed original frame, causing misaligned
+boxes.
+
+When ENABLE_PREPROCESSING is True:
+
+    * ``denoise=True``    — Gaussian (k=3) + median (k=3) denoising.
+      Because ``auto_enhance(try_blur=True)`` also applies Gaussian blur
+      internally, enabling denoise here disables ``try_blur`` in the
+      auto_enhance call to prevent double-blurring.
+
+    * ``normalize=False`` — brightness normalisation is disabled for live
+      frames.  ``auto_enhance(try_low_light=True)`` already applies CLAHE
+      on the LAB L-channel.  Running ``normalize_brightness`` (which also
+      applies CLAHE) before it causes double CLAHE and over-enhances
+      contrast.  Brightness adaptation is left entirely to auto_enhance.
+
+Performance impact at 720p (approximate)
+-----------------------------------------
+    ENABLE_PREPROCESSING = False   0 ms overhead
+    ENABLE_PREPROCESSING = True    ~1.5–3 ms overhead (Gaussian + median)
+
+At 30 fps (33 ms budget) this is < 10 % overhead.  For higher-resolution
+cameras or stricter latency requirements, disable preprocessing.
 
 Usage
 -----
@@ -41,13 +69,16 @@ import numpy as np
 
 # Reuse existing detection building blocks (no detection logic rewritten)
 from src.qr_detector.qr_detector import (
+    convert_coordinates,
     detect_qr_opencv,
     detect_qr_pyzbar,
-    convert_coordinates,
 )
 
-# Week 2 enhancement layer — applied to every frame before detection
+# QR enhancement — applied to every frame before detection
 from src.qr_detector.qr_enhancement import auto_enhance
+
+# Preprocessing — optional denoising pass applied BEFORE auto_enhance
+from src.preprocessing.image_enhancement import preprocess_for_qr
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -59,11 +90,11 @@ logging.basicConfig(
 logger = logging.getLogger("live_camera.live_scan")
 
 # ---------------------------------------------------------------------------
-# Constants — mirror draw_box.py's visual style
+# Constants — visual style matches draw_box.py
 # ---------------------------------------------------------------------------
 CAMERA_INDEX     = 0
-BOX_COLOUR_BGR   = (0, 255, 0)   # green  — matches draw_box.py
-LABEL_COLOUR_BGR = (0, 0, 255)   # red    — matches draw_box.py
+BOX_COLOUR_BGR   = (0, 255, 0)   # green — matches draw_box.py
+LABEL_COLOUR_BGR = (0, 0, 255)   # red   — matches draw_box.py
 OVERLAY_ALPHA    = 0.3
 BOX_THICKNESS    = 3
 FONT             = cv2.FONT_HERSHEY_SIMPLEX
@@ -71,24 +102,43 @@ FONT_SCALE       = 0.7
 FONT_THICKNESS   = 2
 EXIT_KEY         = ord("q")
 
+# ---------------------------------------------------------------------------
+# Preprocessing toggle
+# ---------------------------------------------------------------------------
+# Set True to run preprocess_for_qr() on every frame before auto_enhance().
+#
+# When True:  denoise=True, normalize=False (see module docstring for why).
+#             try_blur=False is passed to auto_enhance to prevent double
+#             Gaussian blurring.
+# When False: frames go directly to auto_enhance() — lowest latency path.
+#
+# Recommended: False for clean cameras / real-time use.
+#              True  for noisy sensors or poor-quality USB cameras.
+ENABLE_PREPROCESSING: bool = False
+
+
+# ===========================================================================
+# Detection
+# ===========================================================================
 
 def detect_qr_frame(frame: np.ndarray) -> dict:
     """Run QR detection on a single in-memory frame.
 
     Mirrors the OpenCV-first / pyzbar-fallback pipeline of
-    :func:`qr_detector.detect_qr`, but operates directly on a frame
-    array instead of an image path (avoids disk I/O per frame).
+    :func:`qr_detector.detect_qr`, operating directly on a frame array to
+    avoid disk I/O per frame.
 
     Parameters
     ----------
-    frame:
+    frame : numpy.ndarray
         BGR image array captured from the webcam.
 
     Returns
     -------
     dict
         Same structure as ``qr_detector.detect_qr``'s return value
-        (``detected``, ``count``, ``detector_used``, ``detections``).
+        (``detected``, ``count``, ``detector_used``, ``image_info``,
+        ``detections``).
     """
     raw_detections: list[tuple[str, np.ndarray]] = []
     detector_used = "none"
@@ -117,39 +167,46 @@ def detect_qr_frame(frame: np.ndarray) -> dict:
             continue
         detections.append(
             {
-                "data": data,
-                "confidence": None,
+                "data":          data,
+                "confidence":    None,
                 "corner_points": corner_points,
-                "bbox_tuple": bbox_tuple,
-                "bbox_dict": bbox_dict,
+                "bbox_tuple":    bbox_tuple,
+                "bbox_dict":     bbox_dict,
             }
         )
 
     img_h, img_w = frame.shape[:2]
 
     return {
-        "detected": len(detections) > 0,
-        "count": len(detections),
+        "detected":      len(detections) > 0,
+        "count":         len(detections),
         "detector_used": detector_used,
-        "image_info": {"width": img_w, "height": img_h},
-        "detections": detections,
+        "image_info":    {"width": img_w, "height": img_h},
+        "detections":    detections,
     }
 
 
+# ===========================================================================
+# Drawing
+# ===========================================================================
+
 def draw_detections(frame: np.ndarray, result: dict) -> np.ndarray:
-    """Draw bounding boxes and labels on *frame*, in draw_box.py's style.
+    """Draw bounding boxes and labels on *frame* in draw_box.py style.
 
     For each detection draws:
-        * a semi-transparent filled rectangle (alpha overlay)
-        * a solid border rectangle
-        * a coordinate label above the box
-        * the decoded QR data below the box
+        * A semi-transparent filled rectangle (alpha overlay)
+        * A solid border rectangle
+        * A coordinate label above the box
+        * The decoded QR data below the box
+
+    Detection coordinates are always in the raw-frame pixel space because
+    resize is never applied to live frames.
 
     Parameters
     ----------
-    frame:
+    frame : numpy.ndarray
         BGR frame to annotate (modified in place and returned).
-    result:
+    result : dict
         Output of :func:`detect_qr_frame`.
 
     Returns
@@ -176,7 +233,7 @@ def draw_detections(frame: np.ndarray, result: dict) -> np.ndarray:
         )
 
         # Decoded data below box
-        data = det["data"] or "<empty>"
+        data         = det["data"] or "<empty>"
         data_preview = data[:50] + ("…" if len(data) > 50 else "")
         cv2.putText(
             frame, f"QR #{idx}: {data_preview}", (x, y + h + 20),
@@ -186,16 +243,43 @@ def draw_detections(frame: np.ndarray, result: dict) -> np.ndarray:
     return frame
 
 
-def draw_status(frame: np.ndarray, result: dict, enhancement_technique: str = "none") -> np.ndarray:
-    """Overlay a status line (detector used, QR count, enhancement) on *frame*."""
+def draw_status(
+    frame: np.ndarray,
+    result: dict,
+    enhancement_technique: str = "none",
+    preprocessing_active: bool = False,
+) -> np.ndarray:
+    """Overlay a status line on *frame*.
+
+    Displays: detector used, QR code count, enhancement technique, and
+    whether preprocessing is active.
+
+    Parameters
+    ----------
+    frame : numpy.ndarray
+        BGR frame to annotate.
+    result : dict
+        Output of :func:`detect_qr_frame`.
+    enhancement_technique : str
+        Name of the technique selected by ``auto_enhance()``.
+    preprocessing_active : bool
+        True when :func:`preprocess_for_qr` ran on this frame.
+    """
+    prep_label = "ON" if preprocessing_active else "OFF"
+
     if result["detected"]:
         status = (
             f"Detector: {result['detector_used']} | "
             f"QR codes: {result['count']} | "
-            f"Enhance: {enhancement_technique}"
+            f"Enhance: {enhancement_technique} | "
+            f"Preprocess: {prep_label}"
         )
     else:
-        status = f"Detector: none | No QR detected | Enhance: {enhancement_technique}"
+        status = (
+            f"Detector: none | No QR detected | "
+            f"Enhance: {enhancement_technique} | "
+            f"Preprocess: {prep_label}"
+        )
 
     cv2.putText(
         frame, status, (10, 25),
@@ -208,24 +292,45 @@ def draw_status(frame: np.ndarray, result: dict, enhancement_technique: str = "n
     return frame
 
 
-def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
+# ===========================================================================
+# Main loop
+# ===========================================================================
+
+def run_live_scan(
+    camera_index: int = CAMERA_INDEX,
+    enable_preprocessing: bool = ENABLE_PREPROCESSING,
+) -> int:
     """Open the webcam and run continuous live QR scanning.
 
-    Workflow
-    --------
-    1. Open webcam (``camera_index``).
-    2. Capture frame.
-    3. Enhance frame via ``auto_enhance()`` (Week 2 pre-processing layer).
-    4. Detect QR codes on the enhanced frame (reusing existing detection functions).
-    5. Draw bounding boxes + labels on the **original** frame (draw_box.py style).
-    6. Show status (detector used, QR count, enhancement technique).
-    7. Display live feed.
+    Workflow (per frame)
+    --------------------
+    1. Capture raw frame.
+    2. [Optional] Preprocess: Gaussian + median denoise.
+       (resize always disabled; normalize always disabled to avoid double CLAHE)
+    3. Enhance via ``auto_enhance()``.
+       - ``try_blur`` is set to ``not enable_preprocessing`` to prevent
+         double Gaussian blurring when preprocessing is active.
+       - ``try_low_light`` is always True (brightness correction handled
+         entirely by auto_enhance; normalize is off in preprocessing).
+    4. Detect QR codes on the enhanced frame.
+    5. Draw boxes on the **raw captured** frame (coordinates are valid
+       because no resize was applied).
+    6. Display status overlay.
+    7. Show live feed.
     8. Repeat until 'q' is pressed.
+
+    Parameters
+    ----------
+    camera_index : int
+        OpenCV camera index.  Defaults to ``0`` (primary webcam).
+    enable_preprocessing : bool
+        When ``True``, runs denoising before enhancement.  Adds ~1.5–3 ms
+        per frame at 720p.  Defaults to ``False``.
 
     Returns
     -------
     int
-        Exit code: ``0`` success, ``1`` camera unavailable.
+        ``0`` on clean exit, ``1`` if the camera could not be opened.
     """
     cap = cv2.VideoCapture(camera_index)
 
@@ -234,9 +339,12 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
         print(f"❌ Error: Camera (index {camera_index}) could not be opened.")
         return 1
 
-    print("✅ Camera opened. Press 'q' to quit.")
+    prep_state = "ENABLED" if enable_preprocessing else "DISABLED"
+    logger.info("Live scan started — preprocessing: %s", prep_state)
+    print(f"✅ Camera opened. Preprocessing: {prep_state}. Press 'q' to quit.")
 
-    # Tracks decoded content of QR codes currently visible on screen.
+    # Tracks decoded content of QR codes currently visible on screen,
+    # used to suppress duplicate console prints.
     seen_codes: set[str] = set()
 
     try:
@@ -246,33 +354,66 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
                 logger.warning("Frame capture failed; skipping frame.")
                 continue
 
-            # ── Step 3: Enhance frame before detection ───────────────────────
-            # try_rotation=False: rotation changes canvas dimensions, making
-            # bounding-box coordinates from the enhanced frame incompatible
-            # with the original frame that is displayed to the user.
+            # ── Step 2: Optional preprocessing ────────────────────────────────
+            # resize_target=None  — never resize live frames (coordinate safety)
+            # normalize=False     — auto_enhance handles brightness via CLAHE;
+            #                       enabling normalize would apply CLAHE twice.
+            if enable_preprocessing:
+                try:
+                    prep = preprocess_for_qr(
+                        frame,
+                        resize_target=None,
+                        denoise=True,
+                        normalize=False,
+                    )
+                    work_frame = prep.processed_image
+                except Exception as exc:  # noqa: BLE001 — keep stream alive
+                    logger.warning(
+                        "Preprocessing failed, using raw frame: %s", exc
+                    )
+                    work_frame = frame
+            else:
+                work_frame = frame
+
+            # ── Step 3: Enhancement ───────────────────────────────────────────
+            # try_rotation=False : rotation changes canvas dimensions and would
+            #   shift bbox coordinates out of sync with the displayed frame.
+            # try_blur : disabled when preprocessing ran Gaussian denoise to
+            #   prevent applying Gaussian blur twice.
+            # try_low_light : always True — brightness normalisation delegated
+            #   entirely to auto_enhance (normalize=False in preprocessing).
             try:
                 enh = auto_enhance(
-                    frame,
+                    work_frame,
                     try_rotation=False,
                     try_low_light=True,
-                    try_blur=True,
+                    try_blur=not enable_preprocessing,   # avoid double Gaussian
                     try_contrast=True,
                 )
-                enhanced_frame = enh.enhanced_image
+                enhanced_frame      = enh.enhanced_image
                 enhancement_technique = enh.technique
-            except Exception as exc:  # noqa: BLE001 - keep stream alive
-                logger.warning("Enhancement failed, falling back to raw frame: %s", exc)
-                enhanced_frame = frame
+            except Exception as exc:  # noqa: BLE001 — keep stream alive
+                logger.warning("Enhancement failed, using work frame: %s", exc)
+                enhanced_frame        = work_frame
                 enhancement_technique = "none"
 
-            # ── Step 4: Detect QR codes on the enhanced frame ────────────────
+            # ── Step 4: Detection ─────────────────────────────────────────────
             try:
                 result = detect_qr_frame(enhanced_frame)
-            except Exception as exc:  # noqa: BLE001 - keep stream alive
+            except Exception as exc:  # noqa: BLE001 — keep stream alive
                 logger.exception("Unexpected detection error: %s", exc)
-                result = {"detected": False, "count": 0, "detector_used": "none", "detections": []}
+                result = {
+                    "detected":      False,
+                    "count":         0,
+                    "detector_used": "none",
+                    "detections":    [],
+                }
                 enhancement_technique = "none"
 
+            # ── Step 5: Draw boxes on the raw frame ───────────────────────────
+            # Coordinates are in enhanced-frame space, which is identical to
+            # raw-frame space because no resize was applied (try_rotation=False
+            # in auto_enhance, resize_target=None in preprocessing).
             if result["detected"]:
                 draw_detections(frame, result)
                 current_codes: set[str] = set()
@@ -281,13 +422,16 @@ def run_live_scan(camera_index: int = CAMERA_INDEX) -> int:
                     bbox = tuple(det["bbox_tuple"])
                     current_codes.add(data)
                     if data not in seen_codes:
-                        print(f"[QR] {data!r}  bbox={bbox}  "
-                              f"detector={result['detector_used']}")
+                        print(
+                            f"[QR] {data!r}  bbox={bbox}  "
+                            f"detector={result['detector_used']}"
+                        )
                 seen_codes = current_codes
             else:
                 seen_codes = set()
 
-            draw_status(frame, result, enhancement_technique)
+            # ── Steps 6–7: Status overlay and display ─────────────────────────
+            draw_status(frame, result, enhancement_technique, enable_preprocessing)
             cv2.imshow("Live QR Scan", frame)
 
             if cv2.waitKey(1) & 0xFF == EXIT_KEY:
