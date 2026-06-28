@@ -1,0 +1,9 @@
+{
+    "detected": true,
+    "tampered": true,
+    "confidence": 0.82,
+    "risk_level": "HIGH_RISK",
+    "score": 87,
+    "summary": "Possible QR tampering detected.",
+    "timestamp": "2026-06-28T19:56:36.784810"
+}
