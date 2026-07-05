@@ -87,3 +87,4 @@ class TamperResult:
                 if r and r not in seen:
                     self.reasons.append(r)
                     seen.add(r)
+
