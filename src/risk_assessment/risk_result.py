@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -386,6 +386,37 @@ class RiskResult:
             "metadata":             dict(self.metadata),
         }
 
+    def to_json(self, *, indent: int | None = None) -> str:
+        """Serialise this result directly to a JSON string.
+
+        Thin convenience wrapper around :meth:`to_dict` +
+        :func:`json.dumps` for call sites (CLI tools, log sinks, message
+        queues) that want a JSON string rather than a dict — avoiding the
+        easy-to-forget two-step ``json.dumps(result.to_dict())`` at every
+        call site.
+
+        Parameters
+        ----------
+        indent : int, optional
+            Passed through to :func:`json.dumps`. ``None`` (default)
+            produces compact single-line JSON, suitable for log lines and
+            message queues; use ``2`` for pretty-printed output.
+
+        Returns
+        -------
+        str
+            JSON-encoded string equivalent to ``json.dumps(self.to_dict())``.
+
+        Example
+        -------
+        ::
+
+            log.info("risk_result=%s", result.to_json())
+            with open("result.json", "w") as fh:
+                fh.write(result.to_json(indent=2))
+        """
+        return json.dumps(self.to_dict(), indent=indent)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RiskResult":
         """Deserialise a ``RiskResult`` from a plain dictionary.
@@ -463,6 +494,47 @@ class RiskResult:
             timestamp=timestamp,
             metadata=dict(data.get("metadata", {})),
         )
+
+    # ==================================================================
+    # Immutable metadata helpers
+    # ==================================================================
+
+    def with_metadata(self, **updates: Any) -> "RiskResult":
+        """Return a new :class:`RiskResult` with ``metadata`` updated.
+
+        Since ``RiskResult`` is frozen, its ``metadata`` dict cannot be
+        mutated in place (and should not be, per the class docstring's
+        warning that the dict itself is not copied on construction). This
+        helper is the supported way to attach or overwrite metadata keys
+        after construction — e.g. when the Integration pipeline (
+        ``main.py``) wants to stamp a request ID onto a ``RiskResult``
+        that Risk Assessment already produced, without reaching into the
+        internals of a frozen dataclass.
+
+        Parameters
+        ----------
+        **updates : Any
+            Key-value pairs to merge into a *copy* of the existing
+            ``metadata`` dict. Keys not already present are added; keys
+            already present are overwritten. The original instance and
+            its ``metadata`` dict are left untouched.
+
+        Returns
+        -------
+        RiskResult
+            A new, independently-validated instance with every field
+            identical to ``self`` except the merged ``metadata``.
+
+        Example
+        -------
+        ::
+
+            tagged = result.with_metadata(request_id="req_123", retried=False)
+            assert result.metadata.get("request_id") is None   # original untouched
+            assert tagged.metadata["request_id"] == "req_123"
+        """
+        merged_metadata = {**self.metadata, **updates}
+        return replace(self, metadata=merged_metadata)
 
     # ==================================================================
     # Human-readable representations

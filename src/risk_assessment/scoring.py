@@ -287,6 +287,47 @@ class ScoringConfig:
         contributes nothing even if present in ``extra_signals`` — this
         keeps unknown signals inert by default until a researcher
         explicitly assigns them weight. Default ``{}``.
+    enable_anomaly_fusion : bool
+        When ``True`` (default), independent corroborating signals are
+        fused into a small multiplicative score boost — see "Anomaly
+        fusion" below. When ``False``, ``total_score`` is the plain
+        weighted average, matching the Week 3 behaviour exactly.
+    fusion_correlation_threshold : float
+        A factor counts as "corroborating" for fusion purposes when its
+        ``normalised_value`` is at or above this threshold, on
+        ``[0.0, 1.0]``. Default ``0.5``.
+    fusion_min_corroborating_factors : int
+        Minimum number of simultaneously corroborating factors required
+        before any fusion boost is applied. Default ``2`` (a single
+        strong signal is not treated as "correlated" with itself).
+    fusion_boost_per_factor : float
+        Fractional score boost applied per corroborating factor beyond
+        the first, e.g. ``0.08`` = 8% per additional factor. Default
+        ``0.08``.
+    fusion_boost_cap : float
+        Maximum total fractional boost from fusion, regardless of how
+        many factors corroborate. Default ``0.35`` (35%).
+
+    Anomaly fusion
+    --------------
+    A weighted average alone treats independent weak signals as
+    independent — three factors each contributing a modest 0.4
+    normalised risk produce the same *proportional* result as one factor
+    contributing 0.4, because the denominator (applicable weight) grows
+    alongside the numerator. In practice, several independent detectors
+    agreeing that *something* is wrong is stronger evidence than any one
+    of them alone (e.g. edge inconsistency *and* contour mismatch *and*
+    finder-pattern damage co-occurring is far more indicative of a
+    physical overlay attack than any single weak reading in isolation).
+    When ``enable_anomaly_fusion`` is on and at least
+    ``fusion_min_corroborating_factors`` applicable factors reach
+    ``fusion_correlation_threshold``, :class:`ScoringEngine` applies a
+    bounded multiplicative boost (see
+    :meth:`ScoringEngine.compute_score`) on top of the base weighted
+    score, and records the boost transparently in
+    :class:`ScoreBreakdown` (``fusion_applied``, ``fusion_multiplier``,
+    ``corroborating_factor_count``) so the effect is always auditable
+    rather than hidden inside the total.
 
     Raises
     ------
@@ -314,6 +355,13 @@ class ScoringConfig:
     tamper_confidence_weight:      float = 35.0
     ai_confidence_weight:          float = 20.0
     extra_signal_weights:          dict[str, float] = field(default_factory=dict)
+
+    # ── Anomaly fusion (Week 4 addition) ────────────────────────────────
+    enable_anomaly_fusion:           bool  = True
+    fusion_correlation_threshold:    float = 0.5
+    fusion_min_corroborating_factors: int  = 2
+    fusion_boost_per_factor:         float = 0.08
+    fusion_boost_cap:                float = 0.35
 
     def __post_init__(self) -> None:
         weight_fields: dict[str, float] = {
@@ -343,6 +391,27 @@ class ScoringConfig:
                     f"got {value!r}."
                 )
 
+        if not (0.0 <= self.fusion_correlation_threshold <= 1.0):
+            raise ValueError(
+                "fusion_correlation_threshold must be in [0.0, 1.0], got "
+                f"{self.fusion_correlation_threshold!r}."
+            )
+        if self.fusion_min_corroborating_factors < 2:
+            raise ValueError(
+                "fusion_min_corroborating_factors must be >= 2 (fusion "
+                "requires at least two independent corroborating signals), "
+                f"got {self.fusion_min_corroborating_factors!r}."
+            )
+        if self.fusion_boost_per_factor < 0.0:
+            raise ValueError(
+                "fusion_boost_per_factor must be non-negative, got "
+                f"{self.fusion_boost_per_factor!r}."
+            )
+        if self.fusion_boost_cap < 0.0:
+            raise ValueError(
+                f"fusion_boost_cap must be non-negative, got {self.fusion_boost_cap!r}."
+            )
+
     @property
     def as_dict(self) -> dict[str, Any]:
         """Serialise the configuration for inclusion in audit trails."""
@@ -357,6 +426,11 @@ class ScoringConfig:
             "tamper_confidence_weight":      self.tamper_confidence_weight,
             "ai_confidence_weight":          self.ai_confidence_weight,
             "extra_signal_weights":          dict(self.extra_signal_weights),
+            "enable_anomaly_fusion":            self.enable_anomaly_fusion,
+            "fusion_correlation_threshold":     self.fusion_correlation_threshold,
+            "fusion_min_corroborating_factors": self.fusion_min_corroborating_factors,
+            "fusion_boost_per_factor":          self.fusion_boost_per_factor,
+            "fusion_boost_cap":                 self.fusion_boost_cap,
         }
 
 
@@ -454,6 +528,19 @@ class ScoreBreakdown:
     config_snapshot : dict[str, Any]
         Serialised :class:`ScoringConfig` active at evaluation time, for
         full reproducibility.
+    fusion_applied : bool
+        Whether the anomaly-fusion boost (see
+        :class:`ScoringConfig`) was applied to this result. Default
+        ``False``.
+    fusion_multiplier : float
+        The multiplicative factor applied to the pre-fusion weighted
+        score, e.g. ``1.16`` for a 16% boost. ``1.0`` when fusion was
+        not applied or is disabled. Default ``1.0``.
+    corroborating_factor_count : int
+        Number of applicable factors whose ``normalised_value`` reached
+        ``fusion_correlation_threshold``, regardless of whether fusion
+        was ultimately applied (useful for tuning the threshold).
+        Default ``0``.
 
     Notes
     -----
@@ -470,6 +557,9 @@ class ScoreBreakdown:
     applicable_weight_total:    float
     explanation:                 str
     config_snapshot:             dict[str, Any]
+    fusion_applied:               bool  = False
+    fusion_multiplier:            float = 1.0
+    corroborating_factor_count:  int   = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise this breakdown to a JSON-compatible dictionary.
@@ -486,6 +576,9 @@ class ScoreBreakdown:
             "applicable_weight_total": round(self.applicable_weight_total, 6),
             "explanation":              self.explanation,
             "config_snapshot":          dict(self.config_snapshot),
+            "fusion_applied":              self.fusion_applied,
+            "fusion_multiplier":           round(self.fusion_multiplier, 6),
+            "corroborating_factor_count":  self.corroborating_factor_count,
         }
 
     @property
@@ -1257,14 +1350,57 @@ class ScoringEngine:
 
         total_score = max(SCORE_MIN, min(SCORE_MAX, total_score))
 
-        explanation = self._build_explanation(factor_scores, total_score)
+        # ── Anomaly fusion ──────────────────────────────────────────────
+        # Independent corroborating signals are stronger evidence together
+        # than any one of them alone (see ScoringConfig's "Anomaly fusion"
+        # docstring section). Applied *after* the base weighted score so
+        # it can never itself count as a corroborating factor, and always
+        # clamped so the fused score cannot exceed SCORE_MAX.
+        corroborating_count = sum(
+            1 for fs in factor_scores
+            if fs.applicable
+            and fs.normalised_value >= self._config.fusion_correlation_threshold
+        )
+
+        fusion_applied = False
+        fusion_multiplier = 1.0
+
+        if (
+            self._config.enable_anomaly_fusion
+            and corroborating_count >= self._config.fusion_min_corroborating_factors
+            and total_score > SCORE_MIN
+        ):
+            extra_factors = corroborating_count - 1
+            boost = min(
+                self._config.fusion_boost_cap,
+                self._config.fusion_boost_per_factor * extra_factors,
+            )
+            if boost > 0.0:
+                fusion_multiplier = 1.0 + boost
+                fusion_applied = True
+                total_score = max(SCORE_MIN, min(SCORE_MAX, total_score * fusion_multiplier))
+                logger.info(
+                    "ScoringEngine — anomaly fusion applied: "
+                    "%d corroborating factors (>= %.2f threshold) -> "
+                    "x%.3f boost, fused_score=%.2f",
+                    corroborating_count,
+                    self._config.fusion_correlation_threshold,
+                    fusion_multiplier,
+                    total_score,
+                )
+
+        explanation = self._build_explanation(
+            factor_scores, total_score, fusion_applied, corroborating_count,
+        )
 
         logger.info(
             "ScoringEngine.compute_score — total_score=%.2f, "
-            "applicable_factors=%d/%d",
+            "applicable_factors=%d/%d, corroborating=%d, fusion_applied=%s",
             total_score,
             sum(1 for fs in factor_scores if fs.applicable),
             len(factor_scores),
+            corroborating_count,
+            fusion_applied,
         )
 
         return ScoreBreakdown(
@@ -1273,6 +1409,9 @@ class ScoringEngine:
             applicable_weight_total=applicable_weight_total,
             explanation=explanation,
             config_snapshot=self._config.as_dict,
+            fusion_applied=fusion_applied,
+            fusion_multiplier=fusion_multiplier,
+            corroborating_factor_count=corroborating_count,
         )
 
     # -----------------------------------------------------------------------
@@ -1281,8 +1420,10 @@ class ScoringEngine:
 
     @staticmethod
     def _build_explanation(
-        factor_scores: list[FactorScore],
-        total_score:   float,
+        factor_scores:        list[FactorScore],
+        total_score:          float,
+        fusion_applied:       bool = False,
+        corroborating_count:  int  = 0,
     ) -> str:
         """Build a multi-sentence narrative summarising the score breakdown.
 
@@ -1291,14 +1432,19 @@ class ScoringEngine:
         factor_scores : list[FactorScore]
             All factor scores, applicable and inapplicable.
         total_score : float
-            The final computed score.
+            The final computed score (post-fusion, if applied).
+        fusion_applied : bool, optional
+            Whether the anomaly-fusion boost was applied. Default ``False``.
+        corroborating_count : int, optional
+            Number of factors that met the fusion correlation threshold.
+            Default ``0``.
 
         Returns
         -------
         str
             A narrative beginning with the total score, followed by the
             top contributing applicable factors in descending order of
-            contribution.
+            contribution, and a closing sentence noting fusion if applied.
         """
         applicable = [fs for fs in factor_scores if fs.applicable]
         contributing = sorted(
@@ -1317,7 +1463,16 @@ class ScoringEngine:
         lead_sentences = [fs.explanation for fs in contributing[:3]]
         narrative = " ".join(lead_sentences)
 
-        return f"Total risk score: {total_score:.2f}/100. {narrative}"
+        fusion_note = ""
+        if fusion_applied:
+            fusion_note = (
+                f" {corroborating_count} independent signals corroborated "
+                f"one another, so the score was boosted above the plain "
+                f"weighted average to reflect their combined evidentiary "
+                f"strength."
+            )
+
+        return f"Total risk score: {total_score:.2f}/100. {narrative}{fusion_note}"
 
 
 # ===========================================================================
