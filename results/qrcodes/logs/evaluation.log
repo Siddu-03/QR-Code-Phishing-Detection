@@ -1,0 +1,8 @@
+12:56:53 [INFO] evaluation — Duplicate detection: 10000 unique image(s), 0 duplicate(s) skipped.
+12:56:53 [INFO] evaluation — Running evaluation with 16 worker(s) over 10000 image(s) (0 already checkpointed).
+12:59:07 [INFO] evaluation — Evaluation finished in 2m 14s (10000/10000 images processed, 0 via duplicate reuse).
+12:59:08 [INFO] evaluation.gallery — Gallery populated: {'detected': 200, 'failed': 0, 'high_risk': 0, 'tampered': 0}
+13:42:26 [INFO] evaluation — Duplicate detection: 10000 unique image(s), 0 duplicate(s) skipped.
+13:42:26 [INFO] evaluation — Running evaluation with 16 worker(s) over 10000 image(s) (0 already checkpointed).
+13:46:17 [INFO] evaluation — Evaluation finished in 3m 51s (10000/10000 images processed, 0 via duplicate reuse).
+13:46:17 [INFO] evaluation.gallery — Gallery populated: {'detected': 200, 'failed': 0, 'high_risk': 0, 'tampered': 0}

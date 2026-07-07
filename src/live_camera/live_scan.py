@@ -3,6 +3,7 @@ live_scan.py
 =============
 Live webcam QR scanning module.
 Week 2 – final production version.
+Week 3 update — Tamper Analysis and Risk Assessment integrated in-line.
 
 Reuses the existing project pipeline:
     - src.qr_detector.qr_detector    : detect_qr_opencv, detect_qr_pyzbar,
@@ -13,6 +14,13 @@ Reuses the existing project pipeline:
                                         denoising pass applied BEFORE
                                         auto_enhance() (controlled by
                                         ENABLE_PREPROCESSING flag)
+    - src.tamper_analysis.tamper_detector : TamperDetector.analyze() — run
+                                        on the raw frame once a QR code is
+                                        detected (see AnalysisCache)
+    - src.risk_assessment.risk_engine : RiskEngine.assess() — run
+                                        immediately after Tamper Analysis,
+                                        consuming both DetectionResult and
+                                        TamperResult
 
 Frame pipeline (per captured frame)
 ------------------------------------
@@ -21,7 +29,16 @@ Frame pipeline (per captured frame)
         → auto_enhance()
         → detect_qr_frame()
         → draw_detections() / draw_status()
+        → [TamperDetector.analyze() on the RAW frame]   ← only if QR found
+        → [RiskEngine.assess()]                         ← only if QR found
+        → draw_security_overlay()
         → cv2.imshow()
+
+This module intentionally does NOT perform URL Analysis, report
+generation, JSON/Markdown export, or evaluation-framework statistics.
+Those remain the responsibility of the desktop image pipeline; see
+``analyze_security()`` below for the documented Week 4 URL Analyzer
+insertion point.
 
 Preprocessing on live frames — design decisions
 -----------------------------------------------
@@ -63,6 +80,8 @@ Controls
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -79,6 +98,12 @@ from src.qr_detector.qr_enhancement import auto_enhance
 
 # Preprocessing — optional denoising pass applied BEFORE auto_enhance
 from src.preprocessing.image_enhancement import preprocess_for_qr
+
+# Week 3 modules — Tamper Analysis and Risk Assessment (reused, not rewritten)
+from src.tamper_analysis.tamper_detector import TamperDetector
+from src.tamper_analysis.tamper_result import TamperResult
+from src.risk_assessment.risk_engine import RiskEngine
+from src.risk_assessment.risk_result import RiskLevel, RiskResult
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -101,6 +126,33 @@ FONT             = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE       = 0.7
 FONT_THICKNESS   = 2
 EXIT_KEY         = ord("q")
+
+# ---------------------------------------------------------------------------
+# Tamper Analysis / Risk Assessment — cache configuration
+# ---------------------------------------------------------------------------
+# A fresh TamperDetector.analyze() + RiskEngine.assess() pass is only run
+# when the decoded QR payload changes (or the cache has expired). While the
+# same payload remains on screen, the cached TamperResult / RiskResult are
+# reused so the overlay can refresh every frame without re-running the
+# (comparatively expensive) analysis stages on each one.
+#
+# CACHE_MISS_FRAME_LIMIT: number of *consecutive* frames with no QR detected
+# before the cache is dropped. A small tolerance absorbs single-frame
+# detection flicker (motion blur, glare, momentary occlusion) without
+# forcing a full re-analysis the instant the code reappears.
+CACHE_MISS_FRAME_LIMIT: int = 10
+
+# Risk-level → BGR colour used for the overlay text. RiskResult.risk_level
+# is one of RiskLevel.SAFE / SUSPICIOUS / HIGH_RISK (see risk_result.py).
+# There is no separate "MEDIUM" / "CRITICAL" tier in the current
+# RiskLevel enum, so SUSPICIOUS is rendered in amber (a SAFE→HIGH_RISK
+# midpoint) and HIGH_RISK in red.
+RISK_LEVEL_COLOURS_BGR = {
+    RiskLevel.SAFE:       (0, 200, 0),     # green
+    RiskLevel.SUSPICIOUS: (0, 165, 255),   # orange/amber
+    RiskLevel.HIGH_RISK:  (0, 0, 255),     # red
+}
+UNAVAILABLE_COLOUR_BGR = (160, 160, 160)  # grey — analysis unavailable
 
 # ---------------------------------------------------------------------------
 # Preprocessing toggle
@@ -293,6 +345,201 @@ def draw_status(
 
 
 # ===========================================================================
+# Tamper Analysis / Risk Assessment
+# ===========================================================================
+#
+# Insertion point for future Week 4 integration
+# ----------------------------------------------
+# The Week 4 URL Analyzer slots in immediately AFTER Tamper Analysis and
+# BEFORE Risk Assessment, turning the pipeline into:
+#
+#     Camera → Preprocessing → Enhancement → Detection → Tamper
+#            → URL Analysis → Risk Assessment → Overlay → Display
+#
+# Concretely, that will mean: inside `analyze_security()` below, call the
+# (future) `URLAnalyzer.analyze(decoded_payload)` right after
+# `tamper_detector.analyze(raw_frame)` succeeds, and pass its result to
+# `risk_engine.assess(...)` alongside `tamper_result` (the engine's
+# `assess()` signature already anticipates additional optional inputs).
+# No other function in this module should need to change.
+
+# Reuse a single detector / engine instance for the lifetime of the process
+# (constructing these per-frame would be needless allocation and defeats
+# any internal setup cost amortisation).
+_TAMPER_DETECTOR = TamperDetector()
+_RISK_ENGINE = RiskEngine()
+
+
+@dataclass
+class AnalysisCache:
+    """Holds the most recent Tamper Analysis / Risk Assessment outcome.
+
+    The cache lets the live loop avoid re-running `TamperDetector.analyze()`
+    and `RiskEngine.assess()` on every frame — both are re-executed only
+    when the decoded QR payload changes, or after the payload has been
+    absent for `CACHE_MISS_FRAME_LIMIT` consecutive frames.
+
+    Attributes
+    ----------
+    payload : str, optional
+        Decoded content of the QR code this cache entry belongs to.
+        ``None`` when nothing has been analyzed yet.
+    tamper_result : TamperResult, optional
+        Cached Tamper Analysis output, or ``None`` if analysis failed /
+        has not run.
+    risk_result : RiskResult, optional
+        Cached Risk Assessment output, or ``None`` if assessment failed /
+        has not run.
+    miss_streak : int
+        Consecutive frames (since the cache was last refreshed) in which
+        no QR code was detected at all.
+    """
+
+    payload: Optional[str] = None
+    tamper_result: Optional[TamperResult] = None
+    risk_result: Optional[RiskResult] = None
+    miss_streak: int = 0
+
+    def is_valid_for(self, payload: str) -> bool:
+        """True if this cache entry can be reused as-is for *payload*."""
+        return self.payload is not None and self.payload == payload
+
+    def clear(self) -> None:
+        self.payload = None
+        self.tamper_result = None
+        self.risk_result = None
+        self.miss_streak = 0
+
+
+def analyze_security(
+    raw_frame: np.ndarray,
+    detection_result: dict,
+    payload: str,
+) -> Tuple[Optional[TamperResult], Optional[RiskResult]]:
+    """Run Tamper Analysis followed immediately by Risk Assessment.
+
+    Both stages are fail-safe from the caller's perspective: any internal
+    exception is caught and logged here so a single bad frame can never
+    terminate the live scanner. On failure the corresponding result is
+    ``None``, and the caller (the overlay) is expected to render
+    "Unavailable" in its place.
+
+    Parameters
+    ----------
+    raw_frame : numpy.ndarray
+        The **original**, unprocessed camera frame (never the
+        preprocessed/enhanced frame) covering the moment of detection.
+    detection_result : dict
+        Output of :func:`detect_qr_frame` (the `DetectionResult` contract
+        consumed by `RiskEngine.assess`).
+    payload : str
+        Decoded content of the (primary) detected QR code — used only for
+        log messages here; caching is handled by the caller.
+
+    Returns
+    -------
+    tuple[TamperResult | None, RiskResult | None]
+    """
+    tamper_result: Optional[TamperResult] = None
+    risk_result: Optional[RiskResult] = None
+
+    try:
+        tamper_result = _TAMPER_DETECTOR.analyze(raw_frame)
+    except Exception as exc:  # noqa: BLE001 — keep stream alive
+        logger.warning("Tamper Analysis failed for %r: %s", payload, exc)
+
+    try:
+        risk_result = _RISK_ENGINE.assess(
+            detection_result,
+            tamper_result=tamper_result,
+        )
+    except Exception as exc:  # noqa: BLE001 — keep stream alive
+        logger.warning("Risk Assessment failed for %r: %s", payload, exc)
+
+    return tamper_result, risk_result
+
+
+# ===========================================================================
+# Security overlay
+# ===========================================================================
+
+def draw_security_overlay(
+    frame: np.ndarray,
+    cache: AnalysisCache,
+    is_cached: bool,
+) -> np.ndarray:
+    """Draw the Tamper Analysis / Risk Assessment status block.
+
+    Rendered every frame from whatever is currently in *cache* (live or
+    reused), so the overlay stays smooth even on frames where no new
+    analysis ran. Displays: Tamper Status, Tamper Confidence, Risk Level,
+    Risk Score, Recommendation, LIVE/CACHED indicator, and Processing Time.
+    Falls back to a grey "Unavailable" line for any stage that failed.
+
+    Parameters
+    ----------
+    frame : numpy.ndarray
+        BGR frame to annotate (modified in place and returned).
+    cache : AnalysisCache
+        Current cache contents to render.
+    is_cached : bool
+        ``True`` if this frame's values were reused from a prior analysis
+        rather than freshly computed.
+    """
+    y = 55
+    line_height = 24
+    source_label = "CACHED" if is_cached else "LIVE"
+
+    if cache.tamper_result is None:
+        cv2.putText(
+            frame, f"Tamper: Unavailable ({source_label})", (10, y),
+            FONT, 0.55, UNAVAILABLE_COLOUR_BGR, 2,
+        )
+        y += line_height
+    else:
+        tr = cache.tamper_result
+        tamper_status = "TAMPERED" if tr.tampered else "CLEAN"
+        tamper_colour = (0, 0, 255) if tr.tampered else (0, 200, 0)
+        cv2.putText(
+            frame,
+            f"Tamper: {tamper_status} (conf={tr.confidence:.0%}) [{source_label}]",
+            (10, y), FONT, 0.55, tamper_colour, 2,
+        )
+        y += line_height
+
+    if cache.risk_result is None:
+        cv2.putText(
+            frame, "Risk: Unavailable", (10, y),
+            FONT, 0.55, UNAVAILABLE_COLOUR_BGR, 2,
+        )
+        y += line_height
+        cv2.putText(
+            frame, "Recommendation: Unavailable", (10, y),
+            FONT, 0.5, UNAVAILABLE_COLOUR_BGR, 1,
+        )
+    else:
+        rr = cache.risk_result
+        risk_colour = RISK_LEVEL_COLOURS_BGR.get(rr.risk_level, UNAVAILABLE_COLOUR_BGR)
+        cv2.putText(
+            frame,
+            f"Risk: {rr.risk_level.display_label} (score={rr.score:.1f})",
+            (10, y), FONT, 0.55, risk_colour, 2,
+        )
+        y += line_height
+        cv2.putText(
+            frame, f"Recommendation: {rr.recommendation}", (10, y),
+            FONT, 0.5, risk_colour, 1,
+        )
+        y += line_height
+        cv2.putText(
+            frame, f"Processing: {rr.processing_time_ms:.1f} ms", (10, y),
+            FONT, 0.5, (200, 200, 200), 1,
+        )
+
+    return frame
+
+
+# ===========================================================================
 # Main loop
 # ===========================================================================
 
@@ -315,9 +562,16 @@ def run_live_scan(
     4. Detect QR codes on the enhanced frame.
     5. Draw boxes on the **raw captured** frame (coordinates are valid
        because no resize was applied).
-    6. Display status overlay.
-    7. Show live feed.
-    8. Repeat until 'q' is pressed.
+    6. If a QR code is detected: run Tamper Analysis (on the **raw**
+       frame, never the preprocessed/enhanced one) and Risk Assessment
+       for the primary decoded payload — but only when that payload is
+       new or the analysis cache has expired; otherwise reuse the
+       cached `TamperResult` / `RiskResult`.
+    7. Display the QR status overlay and the Tamper/Risk security overlay
+       (the security overlay renders every frame from whatever is
+       currently cached, live or reused).
+    8. Show live feed.
+    9. Repeat until 'q' is pressed.
 
     Parameters
     ----------
@@ -346,6 +600,10 @@ def run_live_scan(
     # Tracks decoded content of QR codes currently visible on screen,
     # used to suppress duplicate console prints.
     seen_codes: set[str] = set()
+
+    # Tamper Analysis / Risk Assessment cache — reused across frames while
+    # the same primary QR payload remains on screen (see AnalysisCache).
+    cache = AnalysisCache()
 
     try:
         while True:
@@ -414,6 +672,14 @@ def run_live_scan(
             # Coordinates are in enhanced-frame space, which is identical to
             # raw-frame space because no resize was applied (try_rotation=False
             # in auto_enhance, resize_target=None in preprocessing).
+            #
+            # ── Step 6: Tamper Analysis + Risk Assessment (cached) ────────────
+            # Only the *primary* (first) detection drives Tamper Analysis /
+            # Risk Assessment and the caching below — the security overlay
+            # reports on one QR code at a time, matching AnalysisCache's
+            # single-payload contract. All decoded codes are still boxed
+            # and logged exactly as before.
+            is_cached = True
             if result["detected"]:
                 draw_detections(frame, result)
                 current_codes: set[str] = set()
@@ -427,11 +693,65 @@ def run_live_scan(
                             f"detector={result['detector_used']}"
                         )
                 seen_codes = current_codes
+
+                primary_payload = result["detections"][0]["data"]
+                cache.miss_streak = 0
+                is_cached = cache.is_valid_for(primary_payload)
+
+                if not is_cached:
+                    # New payload (or cache previously expired) — run the
+                    # analysis stages once and cache the outcome. Uses the
+                    # ORIGINAL camera frame, never the preprocessed/enhanced
+                    # one (tamper cues live in the raw pixel data).
+                    tamper_result, risk_result = analyze_security(
+                        frame, result, primary_payload
+                    )
+                    cache.payload = primary_payload
+                    cache.tamper_result = tamper_result
+                    cache.risk_result = risk_result
+
+                    if tamper_result is not None:
+                        logger.info(
+                            "[Tamper] %r — %s (confidence=%.2f)",
+                            primary_payload,
+                            "TAMPERED" if tamper_result.tampered else "clean",
+                            tamper_result.confidence,
+                        )
+                    else:
+                        logger.warning(
+                            "[Tamper] %r — analysis unavailable", primary_payload
+                        )
+
+                    if risk_result is not None:
+                        logger.info(
+                            "[Risk] %r — %s (score=%.1f) — %s",
+                            primary_payload,
+                            risk_result.risk_level.value,
+                            risk_result.score,
+                            risk_result.recommendation,
+                        )
+                    else:
+                        logger.warning(
+                            "[Risk] %r — assessment unavailable", primary_payload
+                        )
             else:
                 seen_codes = set()
+                # No QR this frame — count toward cache expiry rather than
+                # dropping the cache immediately, to absorb brief detection
+                # flicker (motion blur, glare, momentary occlusion).
+                if cache.payload is not None:
+                    cache.miss_streak += 1
+                    if cache.miss_streak >= CACHE_MISS_FRAME_LIMIT:
+                        logger.info(
+                            "[Cache] Expired after %d consecutive frames "
+                            "without a QR code.",
+                            cache.miss_streak,
+                        )
+                        cache.clear()
 
-            # ── Steps 6–7: Status overlay and display ─────────────────────────
+            # ── Step 7: Status + security overlays, Step 8: display ───────────
             draw_status(frame, result, enhancement_technique, enable_preprocessing)
+            draw_security_overlay(frame, cache, is_cached)
             cv2.imshow("Live QR Scan", frame)
 
             if cv2.waitKey(1) & 0xFF == EXIT_KEY:

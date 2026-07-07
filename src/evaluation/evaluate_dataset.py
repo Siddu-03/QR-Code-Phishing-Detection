@@ -698,10 +698,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Recurse into nested subdirectories (default: on; use --no-recursive to disable)",
     )
-    parser.add_argument("--save-json", action="store_true", help="Write results.json / summary.json / benchmark.json")
-    parser.add_argument("--save-csv", action="store_true", help="Write results.csv / category_summary.csv / benchmark.csv")
-    parser.add_argument("--generate-plots", action="store_true", help="Generate the chart set under results/<dataset>/charts/")
-    parser.add_argument("--generate-report", action="store_true", help="Generate Evaluation_Report.md and Evaluation_Report.html")
+    parser.add_argument(
+        "--save-json",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write results.json / summary.json / benchmark.json (default: on; use --no-save-json to disable)",
+    )
+    parser.add_argument(
+        "--save-csv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write results.csv / category_summary.csv / benchmark.csv (default: on; use --no-save-csv to disable)",
+    )
+    parser.add_argument(
+        "--generate-plots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate the chart set under results/<dataset>/charts/ (default: on; use --no-generate-plots to disable)",
+    )
+    parser.add_argument(
+        "--generate-report",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate Evaluation_Report.md and Evaluation_Report.html (default: on; use --no-generate-report to disable)",
+    )
     parser.add_argument("--workers", type=int, default=config.DEFAULT_WORKER_COUNT, help="Number of parallel workers (default: auto-detect CPU cores)")
     parser.add_argument("--verbose", action="store_true", help="Enable DEBUG-level logging")
     parser.add_argument("--fail-fast", action="store_true", help="Stop the run on the first per-image failure")
