@@ -24,7 +24,11 @@ Design philosophy
   to be registered without modifying existing logic.
 * **Independent** — this module has *zero* imports from ``tamper_detector``
   or ``scoring``; it operates purely on the numeric and boolean values
-  passed in by the caller (``risk_engine.py``).
+  passed in by the caller (``risk_engine.py``).  Its only intra-project
+  dependency is ``risk_result.RiskLevel``, the shared, dependency-free
+  enum that both this module and ``risk_result.py`` use as the single
+  source of truth for risk classification (see the Week 4 compatibility
+  note near the top of the implementation below).
 
 Pipeline position
 -----------------
@@ -80,43 +84,32 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
+
+from src.risk_assessment.risk_result import RiskLevel
 
 # ---------------------------------------------------------------------------
 # Module-level logger
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
-
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # Risk Level Enumeration
-# ===========================================================================
-
-class RiskLevel(str, Enum):
-    """Categorical cybersecurity risk classification.
-
-    Inherits from ``str`` so that serialisation to JSON / protobuf / Flutter
-    FFI does not require special handling — the enum value *is* the string.
-
-    Levels
-    ------
-    SAFE
-        The QR code and its embedded URL exhibit no significant indicators
-        of tampering or phishing activity.  The user may proceed with
-        normal caution.
-    SUSPICIOUS
-        One or more anomalies have been detected that warrant additional
-        scrutiny.  Automated blocking is not recommended, but the user
-        should verify the destination URL independently.
-    HIGH_RISK
-        Strong evidence of tampering, spoofing, or phishing behaviour.
-        The QR code should be blocked and the incident logged for review.
-    """
-
-    SAFE       = "SAFE"
-    SUSPICIOUS = "SUSPICIOUS"
-    HIGH_RISK  = "HIGH_RISK"
+# ---------------------------------------------------------------------------
+# NOTE (Week 4 audit): RiskLevel previously had a second, independently
+# defined copy in this module with values identical to
+# ``risk_result.RiskLevel``.  Two distinct ``Enum`` classes sharing the same
+# string values are *not* interchangeable via ``is`` / class identity (only
+# via ``==`` against the ``.value``), which forced ``risk_engine.py`` to
+# rebuild a ``risk_result.RiskLevel`` from ``rule_result.risk_level.value``
+# on every call.  Importing the single canonical enum here removes that
+# duplication, eliminates the value-based reconstruction downstream, and
+# guarantees the two modules can never drift out of sync (e.g. if a new
+# risk tier is ever added to one but not the other).  This module remains
+# independent of ``tamper_detector`` and ``scoring`` — ``risk_result`` is a
+# lightweight, dependency-free data-contract module, not a computation
+# module, so importing it does not reintroduce the coupling this module's
+# design philosophy warns against.
 
 
 # ===========================================================================

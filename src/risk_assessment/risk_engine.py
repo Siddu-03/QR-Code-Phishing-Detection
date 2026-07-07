@@ -474,10 +474,12 @@ class RiskEngine:
             extra_metadata=extra_metadata,
         )
 
-        # ── 9. Map RiskLevel from rule_engine to risk_result ─────────────────
-        # Both modules define a RiskLevel enum with identical values; map by
-        # value string to remain decoupled from rule_engine's enum class.
-        risk_level = RiskLevel(rule_result.risk_level.value)
+        # ── 9. RiskLevel from rule_engine ────────────────────────────────────
+        # As of the Week 4 rule_engine.py cleanup, rule_engine.RiskLevel *is*
+        # risk_result.RiskLevel (a single shared enum, imported rather than
+        # redefined) — see the compatibility note in rule_engine.py. No
+        # value-string reconstruction is needed or possible to get wrong.
+        risk_level = rule_result.risk_level
 
         # ── 10. Construct RiskResult ─────────────────────────────────────────
         # score: scoring.py produces [0, 100]; RiskResult expects [0.0, 1.0].
@@ -834,6 +836,20 @@ class RiskEngine:
             for k in weight_keys
             if k in snapshot and isinstance(snapshot[k], (int, float))
         )
+
+        # Week 4 fix: dynamically registered ``ExtraSignalFactor`` weights
+        # (``ScoringConfig.extra_signal_weights``) were previously omitted
+        # from this denominator, which silently inflated the derived
+        # confidence whenever a research run registered extra signals —
+        # the numerator (``applicable_weight_total``) already includes
+        # them, but the denominator did not, so confidence could exceed
+        # its intended proportional meaning. Include them for correctness.
+        extra_weights = snapshot.get("extra_signal_weights")
+        if isinstance(extra_weights, dict):
+            total_possible += sum(
+                float(v) for v in extra_weights.values()
+                if isinstance(v, (int, float))
+            )
 
         if total_possible <= 0.0:
             logger.debug(
