@@ -1,8 +1,38 @@
-12:56:53 [INFO] evaluation — Duplicate detection: 10000 unique image(s), 0 duplicate(s) skipped.
-12:56:53 [INFO] evaluation — Running evaluation with 16 worker(s) over 10000 image(s) (0 already checkpointed).
-12:59:07 [INFO] evaluation — Evaluation finished in 2m 14s (10000/10000 images processed, 0 via duplicate reuse).
-12:59:08 [INFO] evaluation.gallery — Gallery populated: {'detected': 200, 'failed': 0, 'high_risk': 0, 'tampered': 0}
-13:42:26 [INFO] evaluation — Duplicate detection: 10000 unique image(s), 0 duplicate(s) skipped.
-13:42:26 [INFO] evaluation — Running evaluation with 16 worker(s) over 10000 image(s) (0 already checkpointed).
-13:46:17 [INFO] evaluation — Evaluation finished in 3m 51s (10000/10000 images processed, 0 via duplicate reuse).
-13:46:17 [INFO] evaluation.gallery — Gallery populated: {'detected': 200, 'failed': 0, 'high_risk': 0, 'tampered': 0}
+20:12:39 [INFO] evaluation — Duplicate detection: 10000 unique image(s), 0 duplicate(s) skipped.
+20:12:39 [INFO] evaluation — Running evaluation with 16 worker(s) over 10000 image(s) (0 already checkpointed).
+20:14:52 [INFO] evaluation — Evaluation finished in 2m 12s (10000/10000 images processed, 0 via duplicate reuse).
+20:14:52 [INFO] evaluation.evaluate_dataset — CSV outputs written to results\qrcodes\runs\qrcodes_20260707_201140\csv
+20:14:52 [INFO] evaluation.evaluate_dataset — JSON outputs written to results\qrcodes\runs\qrcodes_20260707_201140\json
+20:14:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\detection_rate_per_category.png
+20:14:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\average_processing_time.png
+20:14:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\confusion_matrix_qr_detection.png
+20:14:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\confusion_matrix_risk_classification.png
+20:14:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\risk_level_distribution.png
+20:14:54 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\confidence_distribution.png
+20:14:54 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\processing_time_histogram.png
+20:14:54 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\detection_success_pie.png
+20:14:54 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201140\charts\false_positive_vs_negative.png
+20:14:54 [INFO] evaluation.evaluate_dataset — Markdown report written to results\qrcodes\runs\qrcodes_20260707_201140\reports\Evaluation_Report.md
+20:14:54 [INFO] evaluation.evaluate_dataset — HTML report written to results\qrcodes\runs\qrcodes_20260707_201140\reports\Evaluation_Report.html
+20:14:54 [INFO] evaluation.gallery — Gallery populated: {'detected': 200, 'failed': 0, 'high_risk': 0, 'tampered': 0}
+20:14:54 [INFO] evaluation.evaluate_dataset — Experiment metadata written to results\qrcodes\runs\qrcodes_20260707_201140\experiment.json
+20:14:54 [INFO] evaluation.evaluate_dataset — latest/ synced to results\qrcodes\runs\qrcodes_20260707_201140 -> results\qrcodes\latest
+20:18:56 [INFO] evaluation — Duplicate detection: 10000 unique image(s), 0 duplicate(s) skipped.
+20:18:56 [INFO] evaluation — Running evaluation with 16 worker(s) over 10000 image(s) (0 already checkpointed).
+20:20:51 [INFO] evaluation — Evaluation finished in 1m 55s (10000/10000 images processed, 0 via duplicate reuse).
+20:20:52 [INFO] evaluation.evaluate_dataset — CSV outputs written to results\qrcodes\runs\qrcodes_20260707_201756\csv
+20:20:52 [INFO] evaluation.evaluate_dataset — JSON outputs written to results\qrcodes\runs\qrcodes_20260707_201756\json
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\detection_rate_per_category.png
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\average_processing_time.png
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\confusion_matrix_qr_detection.png
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\confusion_matrix_risk_classification.png
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\risk_level_distribution.png
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\confidence_distribution.png
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\processing_time_histogram.png
+20:20:53 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\detection_success_pie.png
+20:20:54 [INFO] evaluation.plots — Saved plot: results\qrcodes\runs\qrcodes_20260707_201756\charts\false_positive_vs_negative.png
+20:20:54 [INFO] evaluation.evaluate_dataset — Markdown report written to results\qrcodes\runs\qrcodes_20260707_201756\reports\Evaluation_Report.md
+20:20:54 [INFO] evaluation.evaluate_dataset — HTML report written to results\qrcodes\runs\qrcodes_20260707_201756\reports\Evaluation_Report.html
+20:20:54 [INFO] evaluation.gallery — Gallery populated: {'detected': 200, 'failed': 0, 'high_risk': 0, 'tampered': 0}
+20:20:54 [INFO] evaluation.evaluate_dataset — Experiment metadata written to results\qrcodes\runs\qrcodes_20260707_201756\experiment.json
+20:20:54 [INFO] evaluation.evaluate_dataset — latest/ synced to results\qrcodes\runs\qrcodes_20260707_201756 -> results\qrcodes\latest

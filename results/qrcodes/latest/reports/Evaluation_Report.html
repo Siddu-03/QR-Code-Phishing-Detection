@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>QR Shield — Evaluation Report</title>
+<style>
+body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 2rem;
+       background: #0f172a; color: #e2e8f0; }
+h1 { font-size: 1.8rem; margin-bottom: 0.2rem; }
+h2 { margin-top: 2.5rem; border-bottom: 1px solid #334155; padding-bottom: 0.4rem; }
+.meta { color: #94a3b8; font-size: 0.9rem; margin-bottom: 1.5rem; }
+.cards { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0; }
+.card { background: #1e293b; border-radius: 10px; padding: 1rem 1.4rem; min-width: 160px; }
+.card .label { color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; }
+.card .value { font-size: 1.6rem; font-weight: 700; margin-top: 0.2rem; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }
+th, td { border: 1px solid #334155; padding: 0.5rem 0.8rem; text-align: left; }
+th { background: #1e293b; }
+tr:nth-child(even) { background: #16213a; }
+.charts { display: flex; flex-wrap: wrap; gap: 1.2rem; margin-top: 1rem; }
+.charts figure { margin: 0; background: #1e293b; padding: 0.8rem; border-radius: 10px; }
+.charts img { max-width: 420px; display: block; border-radius: 6px; }
+.charts figcaption { color: #94a3b8; font-size: 0.85rem; margin-top: 0.4rem; text-align: center; }
+</style>
+</head>
+<body>
+<h1>QR Shield — Evaluation Report</h1>
+<div class="meta">Generated: 2026-07-07T14:50:54.106978+00:00 &middot; Dataset: <code>C:\Users\SIDDU\AppData\Local\Temp\qrshield_eval_dfqriv2j</code></div>
+
+<div class="cards"><div class="card"><div class="label">Images Evaluated</div><div class="value">10000</div></div><div class="card"><div class="label">Categories</div><div class="value">1</div></div><div class="card"><div class="label">Success Rate</div><div class="value">100.0%</div></div><div class="card"><div class="label">Detection Rate</div><div class="value">100.0%</div></div><div class="card"><div class="label">Risk F1</div><div class="value">0.000</div></div><div class="card"><div class="label">Throughput</div><div class="value">86.87 img/s</div></div></div>
+
+<h2>System Information</h2><div class='cards'><div class="card"><div class="label">OS</div><div class="value">Windows 11</div></div><div class="card"><div class="label">CPU Cores</div><div class="value">16</div></div><div class="card"><div class="label">RAM</div><div class="value">unknown</div></div><div class="card"><div class="label">Python</div><div class="value">3.14.5</div></div><div class="card"><div class="label">OpenCV</div><div class="value">4.13.0</div></div></div>
+
+<h2>QR Detection Metrics</h2>
+<h3>Detection by Category</h3><table><thead><tr><th>Category</th><th>Detection Rate</th><th>Precision</th><th>Recall</th><th>F1</th><th>Accuracy</th><th>TP</th><th>FP</th><th>TN</th><th>FN</th></tr></thead><tbody><tr><td>uncategorized</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td>10000</td><td>0</td><td>0</td><td>0</td></tr></tbody></table>
+<h3>Confusion Matrix — QR Detection</h3><table><tr><th></th><th>Predicted Positive</th><th>Predicted Negative</th></tr><tr><th>Actual Positive</th><td>10000</td><td>0</td></tr><tr><th>Actual Negative</th><td>0</td><td>0</td></tr></table>
+
+<h2>Risk / Malicious-Classification Metrics</h2>
+<h3>Risk Classification by Category</h3><table><thead><tr><th>Category</th><th>Detection Rate</th><th>Precision</th><th>Recall</th><th>F1</th><th>Accuracy</th><th>TP</th><th>FP</th><th>TN</th><th>FN</th></tr></thead><tbody><tr><td>uncategorized</td><td>0.000</td><td>0.000</td><td>0.000</td><td>0.000</td><td>1.000</td><td>0</td><td>0</td><td>10000</td><td>0</td></tr></tbody></table>
+<h3>Confusion Matrix — Risk Classification</h3><table><tr><th></th><th>Predicted Positive</th><th>Predicted Negative</th></tr><tr><th>Actual Positive</th><td>0</td><td>0</td></tr><tr><th>Actual Negative</th><td>0</td><td>10000</td></tr></table>
+
+<h2>Benchmark — Processing Time &amp; Throughput</h2>
+<div class="cards">
+<div class="card"><div class="label">Wall Clock</div><div class="value">115.12s</div></div>
+<div class="card"><div class="label">Workers</div><div class="value">16</div></div>
+<div class="card"><div class="label">Avg FPS</div><div class="value">18.40</div></div>
+</div>
+<table><thead><tr><th>Category</th><th>Images</th><th>Success Rate</th><th>Avg Time (ms)</th><th>Min (ms)</th><th>Max (ms)</th><th>Std Dev</th><th>Avg FPS</th></tr></thead><tbody><tr><td>uncategorized</td><td>10000</td><td>100.0%</td><td>54.35</td><td>24.54</td><td>450.22</td><td>29.57</td><td>18.40</td></tr></tbody></table>
+
+
+
+<h2>Charts</h2><div class='charts'><figure><img src='charts/detection_rate_per_category.png' alt='detection_rate_per_category'><figcaption>Detection Rate Per Category</figcaption></figure><figure><img src='charts/average_processing_time.png' alt='average_processing_time'><figcaption>Average Processing Time</figcaption></figure><figure><img src='charts/confusion_matrix_qr_detection.png' alt='confusion_matrix_qr_detection'><figcaption>Confusion Matrix Qr Detection</figcaption></figure><figure><img src='charts/confusion_matrix_risk_classification.png' alt='confusion_matrix_risk_classification'><figcaption>Confusion Matrix Risk Classification</figcaption></figure><figure><img src='charts/risk_level_distribution.png' alt='risk_level_distribution'><figcaption>Risk Level Distribution</figcaption></figure><figure><img src='charts/confidence_distribution.png' alt='confidence_distribution'><figcaption>Confidence Distribution</figcaption></figure><figure><img src='charts/processing_time_histogram.png' alt='processing_time_histogram'><figcaption>Processing Time Histogram</figcaption></figure><figure><img src='charts/detection_success_pie.png' alt='detection_success_pie'><figcaption>Detection Success Pie</figcaption></figure><figure><img src='charts/false_positive_vs_negative.png' alt='false_positive_vs_negative'><figcaption>False Positive Vs Negative</figcaption></figure></div>
+
+<h2>Conclusions</h2>
+<ul>
+<li>Overall detection F1: <strong>1.000</strong>,
+    risk classification F1: <strong>0.000</strong>.</li>
+<li>The <strong>uncategorized</strong> category had the lowest success/robustness (100.0%).</li>
+</ul>
+
+</body>
+</html>

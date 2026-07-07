@@ -1,0 +1,145 @@
+{
+  "overall": {
+    "category": "overall",
+    "image_count": 10000,
+    "success_count": 10000,
+    "failure_count": 0,
+    "success_rate": 1.0,
+    "failure_rate": 0.0,
+    "average_fps": 18.401,
+    "total_time_ms": {
+      "count": 10000,
+      "mean": 54.3462,
+      "min": 24.5389,
+      "max": 450.2196,
+      "std_dev": 29.5741
+    },
+    "stage_time_ms": {
+      "load": {
+        "count": 10000,
+        "mean": 4.9406,
+        "min": 1.4712,
+        "max": 78.6769,
+        "std_dev": 4.3221
+      },
+      "preprocess": {
+        "count": 10000,
+        "mean": 9.1136,
+        "min": 3.0077,
+        "max": 310.609,
+        "std_dev": 10.8877
+      },
+      "detect": {
+        "count": 10000,
+        "mean": 32.9409,
+        "min": 18.3609,
+        "max": 146.3101,
+        "std_dev": 12.6218
+      },
+      "url_analyze": {
+        "count": 10000,
+        "mean": 0.0522,
+        "min": 0.0016,
+        "max": 67.2167,
+        "std_dev": 1.3081
+      },
+      "risk_assess": {
+        "count": 10000,
+        "mean": 7.299,
+        "min": 0.8593,
+        "max": 75.6925,
+        "std_dev": 9.7969
+      },
+      "report": {
+        "count": 0,
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "std_dev": 0.0
+      }
+    },
+    "fastest_image": "C:\\Users\\SIDDU\\AppData\\Local\\Temp\\qrshield_eval_dfqriv2j\\SIIkoqkh.png",
+    "fastest_time_ms": 24.539,
+    "slowest_image": "C:\\Users\\SIDDU\\AppData\\Local\\Temp\\qrshield_eval_dfqriv2j\\019tKMkf.png",
+    "slowest_time_ms": 450.22
+  },
+  "per_category": {
+    "uncategorized": {
+      "category": "uncategorized",
+      "image_count": 10000,
+      "success_count": 10000,
+      "failure_count": 0,
+      "success_rate": 1.0,
+      "failure_rate": 0.0,
+      "average_fps": 18.401,
+      "total_time_ms": {
+        "count": 10000,
+        "mean": 54.3462,
+        "min": 24.5389,
+        "max": 450.2196,
+        "std_dev": 29.5741
+      },
+      "stage_time_ms": {
+        "load": {
+          "count": 10000,
+          "mean": 4.9406,
+          "min": 1.4712,
+          "max": 78.6769,
+          "std_dev": 4.3221
+        },
+        "preprocess": {
+          "count": 10000,
+          "mean": 9.1136,
+          "min": 3.0077,
+          "max": 310.609,
+          "std_dev": 10.8877
+        },
+        "detect": {
+          "count": 10000,
+          "mean": 32.9409,
+          "min": 18.3609,
+          "max": 146.3101,
+          "std_dev": 12.6218
+        },
+        "url_analyze": {
+          "count": 10000,
+          "mean": 0.0522,
+          "min": 0.0016,
+          "max": 67.2167,
+          "std_dev": 1.3081
+        },
+        "risk_assess": {
+          "count": 10000,
+          "mean": 7.299,
+          "min": 0.8593,
+          "max": 75.6925,
+          "std_dev": 9.7969
+        },
+        "report": {
+          "count": 0,
+          "mean": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "std_dev": 0.0
+        }
+      },
+      "fastest_image": "C:\\Users\\SIDDU\\AppData\\Local\\Temp\\qrshield_eval_dfqriv2j\\SIIkoqkh.png",
+      "fastest_time_ms": 24.539,
+      "slowest_image": "C:\\Users\\SIDDU\\AppData\\Local\\Temp\\qrshield_eval_dfqriv2j\\019tKMkf.png",
+      "slowest_time_ms": 450.22
+    }
+  },
+  "wall_clock_seconds": 115.119,
+  "worker_count": 16,
+  "pipeline_throughput_images_per_sec": 86.866,
+  "system_info": {
+    "os_name": "Windows",
+    "os_release": "11",
+    "machine": "AMD64",
+    "python_version": "3.14.5",
+    "cpu_count": 16,
+    "total_ram_mb": null,
+    "opencv_version": "4.13.0",
+    "numpy_version": "2.4.6"
+  }
+}

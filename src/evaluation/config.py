@@ -181,3 +181,55 @@ PIPELINE_STAGE_NAMES: tuple[str, ...] = (
     "risk_assess",
     "report",
 )
+
+# ===========================================================================
+# Experiment management
+# ===========================================================================
+#
+# ``OUTPUT_SUBDIRS`` above still describes every subfolder name produced for
+# a dataset. Experiment management (``evaluate_dataset.py`` only) splits
+# those keys into two groups without changing any of the folder *names*:
+#
+# * ``PERSISTENT_SUBDIR_KEYS`` — created once directly under
+#   ``results/<dataset_name>/`` and reused/appended-to across every run
+#   (``logs/evaluation.log`` keeps appending; ``checkpoints/resume.json``
+#   keeps being overwritten — neither behavior changes).
+# * ``RUN_SUBDIR_KEYS`` — research artifacts that must never be overwritten
+#   between runs, so each run gets its own copy of these subfolders inside
+#   a timestamped experiment directory.
+
+#: Subdirectory keys (from ``OUTPUT_SUBDIRS``) that live once per dataset,
+#: directly under ``results/<dataset_name>/``, and are shared/cumulative
+#: across every experiment run.
+PERSISTENT_SUBDIR_KEYS: tuple[str, ...] = ("logs", "checkpoints")
+
+#: Subdirectory keys (from ``OUTPUT_SUBDIRS``) that must be produced fresh,
+#: without overwriting prior runs, inside each timestamped experiment
+#: directory under ``results/<dataset_name>/runs/<run_id>/``.
+RUN_SUBDIR_KEYS: tuple[str, ...] = (
+    "csv", "json", "reports", "charts", "gallery", "failed_images",
+)
+
+#: Name of the folder (under ``results/<dataset_name>/``) that holds every
+#: timestamped experiment run.
+RUNS_DIRNAME: str = "runs"
+
+#: Name of the folder (under ``results/<dataset_name>/``) that always
+#: mirrors the most recently completed experiment run, for tooling/scripts
+#: that want "the latest results" without knowing the run's timestamp.
+LATEST_DIRNAME: str = "latest"
+
+#: Timestamp format embedded in every run directory name:
+#: ``<dataset_name>_<YYYYMMDD_HHMMSS>``.
+RUN_TIMESTAMP_FORMAT: str = "%Y%m%d_%H%M%S"
+
+#: Filename of the per-run metadata document written into every experiment
+#: directory (and mirrored into ``latest/``).
+EXPERIMENT_METADATA_FILENAME: str = "experiment.json"
+
+#: Version identifiers stamped into every ``experiment.json``. These are
+#: independent of the Python package/module versions and simply track the
+#: evaluation-framework and QR Shield pipeline revisions used to produce a
+#: given experiment, for reproducibility when comparing historical runs.
+EVALUATION_FRAMEWORK_VERSION: str = "1.1.0"
+PIPELINE_VERSION: str = "1.0.0"

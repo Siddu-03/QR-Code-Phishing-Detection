@@ -3,3 +3,4 @@ pyzbar
 pillow
 numpy
 streamlit
+matplotlib>=3.8

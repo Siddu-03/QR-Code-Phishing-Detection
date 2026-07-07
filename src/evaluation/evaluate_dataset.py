@@ -24,17 +24,25 @@ called and why ``main.py``'s own ``run_pipeline()`` isn't used verbatim.
 
 Output layout
 -------------
-::
+Experiment management — every evaluation run gets its own timestamped,
+never-overwritten experiment directory under ``runs/``. Only ``logs/`` and
+``checkpoints/`` remain shared/cumulative across runs, exactly as before::
 
     results/<dataset_name>/
-        csv/          results.csv, benchmark.csv, category_summary.csv, ...
-        json/         results.json, summary.json, benchmark.json
-        reports/      Evaluation_Report.md, Evaluation_Report.html
-        charts/       every generated PNG/SVG/PDF chart
-        gallery/      detected/, failed/, high_risk/, tampered/
-        failed_images/  every failed image, uncapped
-        logs/         evaluation.log
-        checkpoints/  resume.json
+        logs/         evaluation.log            (cumulative — unchanged)
+        checkpoints/  resume.json                (overwritten — unchanged)
+        latest/       mirror (copy) of the most recently completed run:
+                      csv/, json/, reports/, charts/, gallery/,
+                      failed_images/, experiment.json
+        runs/
+            <dataset_name>_<YYYYMMDD_HHMMSS>/   (one per evaluation run)
+                csv/          results.csv, benchmark.csv, category_summary.csv, ...
+                json/         results.json, summary.json, benchmark.json
+                reports/      Evaluation_Report.md, Evaluation_Report.html
+                charts/       every generated PNG/SVG/PDF chart
+                gallery/      detected/, failed/, high_risk/, tampered/
+                failed_images/  every failed image, uncapped
+                experiment.json  run metadata (see ``_build_experiment_metadata``)
 
 Usage
 -----
@@ -60,9 +68,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
+import socket
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +93,7 @@ from src.evaluation.utils import (
     StageTimer,
     format_duration,
     ground_truth_for,
+    hash_file,
     load_category_labels,
     setup_logging,
     write_csv,
@@ -267,8 +279,31 @@ def _merge_url_analysis_fields(row: dict[str, Any], url_result: dict[str, Any]) 
 def run_evaluation(args: argparse.Namespace) -> int:
     """Coordinate the full evaluation workflow. Returns a process exit code."""
     with resolve_dataset_source(args.dataset_root) as (dataset_root, dataset_name):
+        # ---- Persistent root (unchanged across runs) ----------------------------
+        # ``out_root`` is the one stable location for this dataset; only
+        # ``logs/`` and ``checkpoints/`` live directly under it, so
+        # evaluation.log keeps appending and resume.json keeps being
+        # overwritten exactly as before experiment management was added.
         out_root = Path(args.output_dir) / dataset_name
-        subdirs = {key: out_root / name for key, name in config.OUTPUT_SUBDIRS.items()}
+
+        # ---- Experiment run root (new — one per evaluation, never reused) -------
+        # Created up front, before any output generation begins, so every
+        # CSV/JSON/report/chart/gallery artifact for this run lands in its
+        # own timestamped directory and never overwrites a previous run.
+        run_timestamp = datetime.now().strftime(config.RUN_TIMESTAMP_FORMAT)
+        run_id = f"{dataset_name}_{run_timestamp}"
+        run_root = out_root / config.RUNS_DIRNAME / run_id
+
+        subdirs = {
+            key: out_root / config.OUTPUT_SUBDIRS[key]
+            for key in config.PERSISTENT_SUBDIR_KEYS
+        }
+        subdirs.update(
+            {
+                key: run_root / config.OUTPUT_SUBDIRS[key]
+                for key in config.RUN_SUBDIR_KEYS
+            }
+        )
         for d in subdirs.values():
             d.mkdir(parents=True, exist_ok=True)
 
@@ -305,6 +340,23 @@ def run_evaluation(args: argparse.Namespace) -> int:
             "Duplicate detection: %d unique image(s), %d duplicate(s) skipped.",
             len(dup_report.unique_records), dup_report.duplicate_count,
         )
+        duplicate_stats = {
+            "unique_count": len(dup_report.unique_records),
+            "duplicate_count": dup_report.duplicate_count,
+        }
+
+        # ---- Experiment metadata: dataset provenance -----------------------------
+        original_dataset_path = Path(args.dataset_root)
+        dataset_type = (
+            "zip" if original_dataset_path.suffix.lower() in config.SUPPORTED_ARCHIVE_EXTENSIONS
+            else "folder"
+        )
+        dataset_hash = (
+            hash_file(original_dataset_path)
+            if dataset_type == "zip" and original_dataset_path.exists()
+            else None
+        )
+        categories_detected = sorted({record.category for record in records})
 
         # ---- Checkpoint / resume ------------------------------------------------
         checkpoint_path = subdirs["checkpoints"] / config.CHECKPOINT_FILENAME
@@ -407,7 +459,16 @@ def run_evaluation(args: argparse.Namespace) -> int:
         )
 
         return _finalize_and_write_outputs(
-            args, results, wall_clock_seconds, worker_count, out_root, subdirs, system_info, dataset_root
+            args, results, wall_clock_seconds, worker_count, out_root, subdirs, system_info, dataset_root,
+            run_root=run_root,
+            run_id=run_id,
+            run_timestamp=run_timestamp,
+            dataset_name=dataset_name,
+            dataset_type=dataset_type,
+            dataset_hash=dataset_hash,
+            categories_detected=categories_detected,
+            duplicate_stats=duplicate_stats,
+            total_images=len(records),
         )
 
 
@@ -507,6 +568,16 @@ def _finalize_and_write_outputs(
     subdirs: dict[str, Path],
     system_info,
     dataset_root: Path,
+    *,
+    run_root: Path,
+    run_id: str,
+    run_timestamp: str,
+    dataset_name: str,
+    dataset_type: str,
+    dataset_hash: str | None,
+    categories_detected: list[str],
+    duplicate_stats: dict[str, int],
+    total_images: int,
 ) -> int:
     """Compute every metric/benchmark once, then hand it to CSV/JSON/plots/reports/gallery."""
     # ---- Detection metrics -------------------------------------------------
@@ -671,12 +742,112 @@ def _finalize_and_write_outputs(
         build_galleries(results, subdirs["gallery"])
         copy_failed_images(results, subdirs["failed_images"])
 
+    # ---- Experiment metadata + latest/ sync (Experiment Management update) -----
+    # Written only after every other artifact above has been produced
+    # successfully, so experiment.json (and the latest/ mirror) never
+    # describes a partially-written run.
+    experiment_metadata = _build_experiment_metadata(
+        run_id=run_id,
+        run_timestamp=run_timestamp,
+        dataset_name=dataset_name,
+        dataset_root=dataset_root,
+        dataset_type=dataset_type,
+        dataset_hash=dataset_hash,
+        total_images=total_images,
+        categories_detected=categories_detected,
+        worker_count=worker_count,
+        wall_clock_seconds=wall_clock_seconds,
+        benchmark=benchmark,
+        duplicate_stats=duplicate_stats,
+        system_info=system_info,
+    )
+    write_json(experiment_metadata, run_root / config.EXPERIMENT_METADATA_FILENAME)
+    logger.info("Experiment metadata written to %s", run_root / config.EXPERIMENT_METADATA_FILENAME)
+
+    latest_dir = _sync_latest_directory(out_root, run_root)
+    logger.info("latest/ synced to %s -> %s", run_root, latest_dir)
+
     failures = len(results) - len(successful)
     print(
         f"\nDone. {len(successful)}/{len(results)} images processed successfully "
-        f"({failures} failure(s)). Outputs in: {out_root}"
+        f"({failures} failure(s)).\n"
+        f"Experiment: {run_id}\n"
+        f"Outputs in: {run_root}\n"
+        f"Latest:     {latest_dir}"
     )
     return 0 if failures == 0 else (0 if not args.fail_fast else 1)
+
+
+def _build_experiment_metadata(
+    *,
+    run_id: str,
+    run_timestamp: str,
+    dataset_name: str,
+    dataset_root: Path,
+    dataset_type: str,
+    dataset_hash: str | None,
+    total_images: int,
+    categories_detected: list[str],
+    worker_count: int,
+    wall_clock_seconds: float,
+    benchmark,
+    duplicate_stats: dict[str, int],
+    system_info,
+) -> dict[str, Any]:
+    """Assemble the ``experiment.json`` payload for a single evaluation run.
+
+    Pulls every field from data already computed elsewhere (``benchmark``,
+    ``system_info``) — no new measurement or computation happens here, only
+    aggregation of existing values into the documented experiment-metadata
+    shape.
+    """
+    info = system_info.to_dict()
+    return {
+        "run_id": run_id,
+        "run_name": dataset_name,
+        "timestamp": run_timestamp,
+        "dataset_name": dataset_name,
+        "dataset_path": str(dataset_root),
+        "dataset_type": dataset_type,
+        "dataset_hash": dataset_hash,
+        "total_images": total_images,
+        "categories_detected": categories_detected,
+        "worker_count": worker_count,
+        "execution_time": wall_clock_seconds,
+        "images_per_second": benchmark.pipeline_throughput_ips,
+        "duplicate_statistics": duplicate_stats,
+        "pipeline_version": config.PIPELINE_VERSION,
+        "python_version": info.get("python_version"),
+        "opencv_version": info.get("opencv_version"),
+        "platform": f"{info.get('os_name', '')} {info.get('os_release', '')}".strip(),
+        "hostname": socket.gethostname(),
+        "evaluation_framework_version": config.EVALUATION_FRAMEWORK_VERSION,
+    }
+
+
+def _sync_latest_directory(out_root: Path, run_root: Path) -> Path:
+    """Mirror the just-completed *run_root* into ``out_root/latest/`` via copies.
+
+    Copy (not symlink/move) is used deliberately so this works identically
+    on Windows, Linux, and macOS. ``latest/`` is fully replaced on every
+    call — it always reflects only the newest run — while every historical
+    ``runs/<run_id>/`` directory is left untouched.
+    """
+    latest_dir = out_root / config.LATEST_DIRNAME
+    if latest_dir.exists():
+        shutil.rmtree(latest_dir)
+    latest_dir.mkdir(parents=True, exist_ok=True)
+
+    for key in config.RUN_SUBDIR_KEYS:
+        src = run_root / config.OUTPUT_SUBDIRS[key]
+        if src.exists():
+            shutil.copytree(src, latest_dir / config.OUTPUT_SUBDIRS[key])
+
+    metadata_src = run_root / config.EXPERIMENT_METADATA_FILENAME
+    if metadata_src.exists():
+        shutil.copy2(metadata_src, latest_dir / config.EXPERIMENT_METADATA_FILENAME)
+
+    return latest_dir
 
 
 # ===========================================================================

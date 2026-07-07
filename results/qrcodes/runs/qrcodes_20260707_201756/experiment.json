@@ -1,0 +1,26 @@
+{
+  "run_id": "qrcodes_20260707_201756",
+  "run_name": "qrcodes",
+  "timestamp": "20260707_201756",
+  "dataset_name": "qrcodes",
+  "dataset_path": "C:\\Users\\SIDDU\\AppData\\Local\\Temp\\qrshield_eval_dfqriv2j",
+  "dataset_type": "zip",
+  "dataset_hash": "f94dde0abac5596de55a2cb361b2a411125f0a10f4d8240d257511492df71e62",
+  "total_images": 10000,
+  "categories_detected": [
+    "uncategorized"
+  ],
+  "worker_count": 16,
+  "execution_time": 115.11948109999958,
+  "images_per_second": 86.86627062984596,
+  "duplicate_statistics": {
+    "unique_count": 10000,
+    "duplicate_count": 0
+  },
+  "pipeline_version": "1.0.0",
+  "python_version": "3.14.5",
+  "opencv_version": "4.13.0",
+  "platform": "Windows 11",
+  "hostname": "LAPTOP-D2TTFURO",
+  "evaluation_framework_version": "1.1.0"
+}

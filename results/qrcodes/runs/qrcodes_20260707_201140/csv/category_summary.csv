@@ -1,0 +1,2 @@
+category,true_positives,false_positives,true_negatives,false_negatives,accuracy,precision,recall,detection_rate,f1_score,specificity,false_positive_rate,false_negative_rate
+uncategorized,10000,0,0,0,1.0,1.0,1.0,1.0,1.0,0.0,0.0,0.0
