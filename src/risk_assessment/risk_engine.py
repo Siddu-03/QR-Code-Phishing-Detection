@@ -29,35 +29,33 @@ classification logic. Its sole responsibility is orchestration:
 
 .. _future-interface:
 
-Future interface — Tamper Analysis
------------------------------------
-Once ``src/tamper_analysis/tamper_result.py`` and companion computer-vision
-modules (overlay detection, edge analysis, contour analysis, finder-pattern
-analysis) are implemented, they should be integrated as follows:
+Tamper Analysis integration (current)
+--------------------------------------
+``RiskEngine.assess`` (and its public convenience wrapper :func:`assess`)
+now accepts an optional ``tamper_result: TamperResult | None = None``
+keyword argument. When supplied, the Tamper Analysis verdict is combined
+with the QR-detection score as an independent, explicitly-weighted
+component (see :class:`RiskEngineConfig.component_weights`, default 70%
+QR detection / 30% tamper analysis) at the composite-scoring step inside
+:meth:`RiskEngine._run_assessment` — *not* by feeding tamper signals into
+``scoring.py``'s ``ScoringInputs``. This keeps ``scoring.py`` and
+``rule_engine.py`` completely unmodified, keeps the QR-only code path
+byte-for-byte identical when ``tamper_result`` is omitted, and keeps the
+tamper contribution independently auditable in
+``RiskResult.metadata["tamper_contribution"]``.
 
-1. **Add a keyword argument** ``tamper_result: TamperResult | None = None``
-   to :meth:`RiskEngine.assess` (and its public convenience wrapper
-   :func:`assess`).
-2. **Populate** ``ScoringInputs.tamper_confidence``,
-   ``ScoringInputs.overlay_detected``, ``ScoringInputs.overlay_confidence``,
-   ``ScoringInputs.edge_inconsistency_score``,
-   ``ScoringInputs.contour_mismatch_score``, and
-   ``ScoringInputs.finder_pattern_damage_score`` from the ``TamperResult``
-   object inside :meth:`RiskEngine._build_scoring_inputs`.
-3. **Propagate** ``tamper_result.anomaly_count`` (or equivalent) to
-   ``ScoringInputs.anomaly_count``.
-4. No other files in the current codebase require modification at that point.
-
-See the ``# FUTURE-TAMPER`` comment blocks throughout this file for the
-exact extension points.
+See :meth:`RiskEngine._compute_tamper_contribution` for the exact
+contribution formula and the ``# FUTURE-URL`` comment blocks throughout
+this file for how a third (URL Analysis) component will slot into the
+same ``component_weights`` mechanism later.
 
 Pipeline position
 -----------------
 ::
 
-    qr_detector.py   ──► risk_engine.py ──► scoring.py   ──┐
-    (future)                                 rule_engine.py ──┤──► RiskResult
-    tamper_analysis/ ──►                                   ──┘
+    qr_detector.py     ──► risk_engine.py ──► scoring.py    ──┐
+    tamper_analysis/   ──►                    rule_engine.py ──┤──► RiskResult
+    (future) url_analyzer ──►                                ──┘
 
     risk_engine.py ──► FastAPI backend ──► Flutter mobile app
                    ──► Reporting module
@@ -82,9 +80,15 @@ Design principles
 Compatibility
 -------------
 *  Python 3.11+.
-*  Depends only on ``scoring.py``, ``rule_engine.py``, and ``risk_result.py``
-   — all three are fully implemented as of Week 3.
-*  Zero imports from ``tamper_analysis`` or any other unfinished module.
+*  Depends on ``scoring.py``, ``rule_engine.py``, and ``risk_result.py``
+   — all three are fully implemented as of Week 3, and are used *exactly*
+   as before; neither module was modified for Tamper Analysis integration.
+*  Optionally depends on ``src.tamper_analysis.tamper_result.TamperResult``
+   for type-hinting the new ``tamper_result`` parameter. This import is
+   guarded (``try/except ImportError``) so the module still imports
+   cleanly, and :meth:`RiskEngine.assess` still works in its original
+   QR-only mode, in environments where Tamper Analysis is not deployed.
+*  Zero imports from any URL-analysis module — not yet integrated by design.
 *  ``qr_detector.py`` output is consumed as a plain ``dict``; no import of
    ``qr_detector`` is required.
 
@@ -142,6 +146,19 @@ from src.risk_assessment.scoring import (
 )
 
 # ---------------------------------------------------------------------------
+# TamperResult integration (Week 3/4 Tamper Analysis module)
+# ---------------------------------------------------------------------------
+# ``TamperResult`` is imported so that ``RiskEngine.assess`` can accept it as
+# an optional, strongly-typed keyword argument (see FUTURE-TAMPER notes,
+# now realised below).  The import is guarded so that this module can still
+# be imported — and behave in its original QR-only mode — in environments
+# where the Tamper Analysis module has not yet been deployed.
+try:
+    from src.tamper_analysis.tamper_result import TamperResult
+except ImportError:  # pragma: no cover - defensive fallback only
+    TamperResult = Any  # type: ignore[assignment,misc]
+
+# ---------------------------------------------------------------------------
 # Module-level logger
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
@@ -187,6 +204,31 @@ class RiskEngineConfig:
         When ``True`` (default), the :class:`RuleEngineResult` dictionary
         (minus ``decision_explanation``, which goes into its own key) is
         serialised into ``RiskResult.metadata["rule_detail"]``.
+    component_weights : dict[str, float], optional
+        Top-level weighting strategy for combining independent pipeline
+        *components* (as opposed to the individual scoring *factors* inside
+        ``scoring.py``) into the final composite risk score.
+
+        Defaults to ``{"qr_detection": 0.70, "tamper_analysis": 0.30,
+        "url_analysis": 0.0}``.
+
+        * ``"qr_detection"`` — weight applied to the normalised
+          ``ScoringEngine``/``RuleEngine`` output derived purely from the
+          QR detection result. This is the only component used today when
+          ``tamper_result`` is omitted from :meth:`RiskEngine.assess`.
+        * ``"tamper_analysis"`` — weight applied to the tamper-contribution
+          score derived from an optional ``TamperResult`` (see
+          :meth:`RiskEngine._compute_tamper_contribution`). Only used when
+          a ``TamperResult`` is supplied.
+        * ``"url_analysis"`` — reserved at ``0.0`` for the future URL
+          Analysis stage (see module docstring, *future_pipeline*). Present
+          now so that adding URL Analysis later is a matter of setting a
+          non-zero weight here (and re-normalising the other two) rather
+          than reshaping the combination logic in :meth:`_run_assessment`.
+
+        The two currently-active weights (``qr_detection`` +
+        ``tamper_analysis``) are expected to sum to ``1.0``; this is
+        validated in :meth:`RiskEngine.__init__`.
     """
 
     scoring_config:                      ScoringConfig    = field(
@@ -198,6 +240,13 @@ class RiskEngineConfig:
     engine_version:                      str  = _ENGINE_VERSION
     include_score_breakdown_in_metadata: bool = True
     include_rule_detail_in_metadata:     bool = True
+    component_weights:                   dict[str, float] = field(
+        default_factory=lambda: {
+            "qr_detection":    0.70,
+            "tamper_analysis": 0.30,
+            "url_analysis":    0.0,   # FUTURE-URL: reserved, currently unused
+        }
+    )
 
 
 # ===========================================================================
@@ -235,6 +284,21 @@ class RiskEngine:
         self._scoring_engine = ScoringEngine(config=config.scoring_config)
         self._rule_engine    = RuleEngine(config=config.rule_config)
 
+        # Validate the currently-active component weights. ``url_analysis``
+        # is intentionally excluded from this check: it is a reserved,
+        # zero-weight placeholder until URL Analysis is integrated (see
+        # RiskEngineConfig.component_weights docstring).
+        active_weight_total = (
+            config.component_weights.get("qr_detection", 0.0)
+            + config.component_weights.get("tamper_analysis", 0.0)
+        )
+        if not (0.99 <= active_weight_total <= 1.01):
+            raise ValueError(
+                "config.component_weights['qr_detection'] + "
+                "config.component_weights['tamper_analysis'] must sum to "
+                f"1.0, got {active_weight_total!r}."
+            )
+
         logger.info(
             "RiskEngine initialised — version=%s, "
             "rule_thresholds=(safe≤%.0f, suspicious≤%.0f), "
@@ -257,11 +321,9 @@ class RiskEngine:
     def assess(
         self,
         detection_result: dict[str, Any],
-        # FUTURE-TAMPER: add tamper_result: TamperResult | None = None
-        # when tamper_analysis is available (Week 3 completion).
-        # No other signature change is needed at that point.
         image_id: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        tamper_result: "TamperResult | None" = None,
     ) -> RiskResult:
         """Perform a complete risk assessment on a QR detection result.
 
@@ -304,7 +366,27 @@ class RiskEngine:
             ``"engine_version"``, ``"image_id"``, ``"detector_used"``,
             ``"qr_count"``, ``"qr_data"``, ``"score_breakdown"``,
             ``"rule_detail"``, ``"decision_explanation"``,
-            ``"scoring_explanation"``, ``"error"``.
+            ``"scoring_explanation"``, ``"error"``, ``"tamper_contribution"``.
+        tamper_result : TamperResult, optional
+            Output of the Tamper Analysis engine
+            (``src.tamper_analysis.tamper_result.TamperResult``) for the
+            same image, if available.  **Optional for backward
+            compatibility** — when omitted (``None``, the default), this
+            method behaves *exactly* as it did before Tamper Analysis
+            integration: the risk score is derived solely from
+            ``detection_result``.
+
+            When provided, ``tamper_result.tampered`` and
+            ``tamper_result.confidence`` are combined with the QR-detection
+            score using the weights in
+            ``RiskEngineConfig.component_weights`` (default: 70% QR
+            detection / 30% tamper analysis — see
+            :meth:`_compute_tamper_contribution` for the exact formula).
+            ``tamper_result.reasons`` are merged into
+            ``RiskResult.reasons``, and ``tamper_result.metadata`` /
+            ``tamper_result.analysis_time_ms`` are recorded under
+            ``RiskResult.metadata["tamper_contribution"]`` for
+            explainability and audit purposes.
 
         Returns
         -------
@@ -336,6 +418,15 @@ class RiskEngine:
             }
             result = engine.assess(detection)
             assert result.risk_level == RiskLevel.SAFE
+
+        With Tamper Analysis (new)::
+
+            from src.tamper_analysis.tamper_result import TamperResult
+
+            tamper = TamperResult(tampered=True, confidence=0.82,
+                                   reasons=["Overlay sticker detected."])
+            result = engine.assess(detection, image_id="img_001",
+                                    tamper_result=tamper)
         """
         t_start = time.perf_counter()
 
@@ -350,6 +441,7 @@ class RiskEngine:
                 image_id=image_id,
                 extra_metadata=extra_metadata or {},
                 t_start=t_start,
+                tamper_result=tamper_result,
             )
 
         except Exception as exc:  # noqa: BLE001
@@ -378,6 +470,7 @@ class RiskEngine:
         image_id: str | None,
         extra_metadata: dict[str, Any],
         t_start: float,
+        tamper_result: "TamperResult | None" = None,
     ) -> RiskResult:
         """Internal pipeline — called by :meth:`assess`.
 
@@ -396,6 +489,10 @@ class RiskEngine:
         t_start : float
             ``time.perf_counter()`` value captured at the start of
             :meth:`assess`.
+        tamper_result : TamperResult | None
+            Optional Tamper Analysis output for the same image. When
+            ``None`` (default), every step below behaves exactly as it did
+            prior to Tamper Analysis integration.
 
         Returns
         -------
@@ -418,11 +515,16 @@ class RiskEngine:
         )
 
         # ── 3. Build ScoringInputs ───────────────────────────────────────────
-        # FUTURE-TAMPER: pass tamper_result here when available.
-        scoring_inputs = self._build_scoring_inputs(
-            qr_signals=qr_signals,
-            # tamper_result=tamper_result,  # FUTURE-TAMPER
-        )
+        # NOTE: intentionally QR-only. The existing QR-detection scoring
+        # logic (ScoringEngine / ScoringInputs) is left untouched so that
+        # its behaviour is byte-for-byte identical to the pre-tamper
+        # implementation. Tamper Analysis is combined *after* scoring, at
+        # the component-weighting step below (step 6a), rather than being
+        # folded into ScoringInputs — this keeps scoring.py's own internal
+        # factor weights (which are already fully subscribed) untouched and
+        # keeps the tamper contribution fully transparent/auditable as its
+        # own explicit term.
+        scoring_inputs = self._build_scoring_inputs(qr_signals=qr_signals)
 
         # ── 4. Invoke ScoringEngine ──────────────────────────────────────────
         logger.debug("RiskEngine — invoking ScoringEngine …")
@@ -438,21 +540,63 @@ class RiskEngine:
         )
 
         # ── 5. Build anomaly indicators for the RuleEngine ──────────────────
-        # FUTURE-TAMPER: add overlay/edge/contour flags from tamper_result.
         anomaly_indicators = self._build_anomaly_indicators(
             qr_signals=qr_signals,
             score_breakdown=score_breakdown,
-            # tamper_result=tamper_result,  # FUTURE-TAMPER
         )
 
-        # ── 6. Invoke RuleEngine ─────────────────────────────────────────────
+        # ── 6. Compute the Tamper Analysis contribution ─────────────────────
+        # Returns an "inapplicable" detail dict (contribution_score=0.0)
+        # when tamper_result is None, so every downstream calculation below
+        # degrades to the original QR-only behaviour automatically.
+        tamper_detail = self._compute_tamper_contribution(tamper_result)
+
+        if tamper_detail["applied"]:
+            # Extend (never overwrite) the QR-derived indicators with a
+            # tamper-analysis indicator so the RuleEngine's anomaly-override
+            # path is aware that independent tamper evidence exists.
+            anomaly_indicators = {
+                **anomaly_indicators,
+                "tamper_detected": tamper_detail["tampered"],
+            }
+            logger.debug(
+                "RiskEngine — tamper contribution: tampered=%s, "
+                "confidence=%.4f, contribution_score=%.4f",
+                tamper_detail["tampered"],
+                tamper_detail["confidence"],
+                tamper_detail["contribution_score"],
+            )
+
+        # ── 6a. Combine QR-detection and Tamper-Analysis components ────────
+        # qr_unit / tamper_unit are both normalised to [0.0, 1.0] before
+        # weighting so the combination is scale-safe regardless of how
+        # scoring.py's internal [0, 100] range is configured.
+        qr_unit = self._normalise_score(score_breakdown.total_score)
+        weights = self._config.component_weights
+
+        if tamper_detail["applied"]:
+            combined_unit = max(0.0, min(1.0, (
+                weights.get("qr_detection", 0.70) * qr_unit
+                + weights.get("tamper_analysis", 0.30)
+                  * tamper_detail["contribution_score"]
+            )))
+            # RuleEngine expects a [0, 100]-scale score, matching the scale
+            # score_breakdown.total_score already uses.
+            rule_engine_score = combined_unit * 100.0
+        else:
+            # No TamperResult supplied: pass the QR score through completely
+            # unmodified so the RuleEngine sees exactly what it always has.
+            combined_unit = qr_unit
+            rule_engine_score = score_breakdown.total_score
+
+        # ── 7. Invoke RuleEngine ─────────────────────────────────────────────
         logger.debug(
             "RiskEngine — invoking RuleEngine (score=%.2f, indicators=%s) …",
-            score_breakdown.total_score,
+            rule_engine_score,
             {k: v for k, v in anomaly_indicators.items() if v} or "none",
         )
         rule_result: RuleEngineResult = self._rule_engine.evaluate(
-            score=score_breakdown.total_score,
+            score=rule_engine_score,
             anomaly_indicators=anomaly_indicators,
         )
 
@@ -462,10 +606,10 @@ class RiskEngine:
             rule_result.applied_rules,
         )
 
-        # ── 7. Measure processing time ───────────────────────────────────────
+        # ── 8. Measure processing time ───────────────────────────────────────
         processing_time_ms = (time.perf_counter() - t_start) * 1_000.0
 
-        # ── 8. Assemble metadata ─────────────────────────────────────────────
+        # ── 9. Assemble metadata ─────────────────────────────────────────────
         metadata = self._build_metadata(
             qr_signals=qr_signals,
             score_breakdown=score_breakdown,
@@ -473,22 +617,58 @@ class RiskEngine:
             image_id=image_id,
             extra_metadata=extra_metadata,
         )
+        if tamper_detail["applied"]:
+            metadata["tamper_contribution"] = {
+                "tampered":            tamper_detail["tampered"],
+                "confidence":          round(tamper_detail["confidence"], 4),
+                "contribution_score":  round(
+                    tamper_detail["contribution_score"], 4
+                ),
+                "reasons":             tamper_detail["reasons"],
+                "analysis_time_ms":    tamper_detail["analysis_time_ms"],
+                "tamper_metadata":     tamper_detail["metadata"],
+                "weight_applied":      weights.get("tamper_analysis", 0.30),
+            }
+            metadata["component_weights"] = dict(weights)
 
-        # ── 9. RiskLevel from rule_engine ────────────────────────────────────
+        # ── 10. RiskLevel from rule_engine ───────────────────────────────────
         # As of the Week 4 rule_engine.py cleanup, rule_engine.RiskLevel *is*
         # risk_result.RiskLevel (a single shared enum, imported rather than
         # redefined) — see the compatibility note in rule_engine.py. No
         # value-string reconstruction is needed or possible to get wrong.
         risk_level = rule_result.risk_level
 
-        # ── 10. Construct RiskResult ─────────────────────────────────────────
-        # score: scoring.py produces [0, 100]; RiskResult expects [0.0, 1.0].
-        # confidence: derived from score_breakdown's applicable weight ratio.
+        # ── 11. Combine explanatory reasons ──────────────────────────────────
+        # Tamper reasons are appended (deduplicated, order-preserving) after
+        # the rule engine's own reasons so QR-derived explanations always
+        # come first, matching the 70/30 weighting priority.
+        combined_reasons = list(rule_result.reasons)
+        if tamper_detail["applied"] and tamper_detail["reasons"]:
+            seen = set(combined_reasons)
+            for reason in tamper_detail["reasons"]:
+                if reason not in seen:
+                    combined_reasons.append(reason)
+                    seen.add(reason)
+
+        # ── 12. Combine confidence ────────────────────────────────────────────
+        qr_confidence = self._derive_confidence(score_breakdown, rule_result)
+        if tamper_detail["applied"]:
+            final_confidence = max(0.0, min(1.0, (
+                weights.get("qr_detection", 0.70) * qr_confidence
+                + weights.get("tamper_analysis", 0.30)
+                  * tamper_detail["confidence"]
+            )))
+        else:
+            final_confidence = qr_confidence
+
+        # ── 13. Construct RiskResult ─────────────────────────────────────────
+        # score: combined_unit already lives in [0.0, 1.0] (== qr_unit,
+        # unchanged, when no TamperResult was supplied).
         result = RiskResult(
             risk_level=risk_level,
-            score=self._normalise_score(score_breakdown.total_score),
-            confidence=self._derive_confidence(score_breakdown, rule_result),
-            reasons=list(rule_result.reasons),
+            score=combined_unit,
+            confidence=final_confidence,
+            reasons=combined_reasons,
             recommendation=rule_result.recommendation,
             processing_time_ms=processing_time_ms,
             timestamp=datetime.now(tz=timezone.utc),
@@ -748,6 +928,90 @@ class RiskEngine:
             # is integrated (future Week 4+).
             "url_mismatch":       False,   # FUTURE: url_analyzer module
             "domain_spoofing":    False,   # FUTURE: url_analyzer module
+        }
+
+    # ------------------------------------------------------------------
+    # Tamper Analysis contribution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_tamper_contribution(
+        tamper_result: "TamperResult | None",
+    ) -> dict[str, Any]:
+        """Derive a normalised, weight-ready contribution from a TamperResult.
+
+        This is the sole integration point between the Tamper Analysis
+        module's output contract and the Risk Engine's composite scoring
+        step (see step 6a in :meth:`_run_assessment`). It deliberately
+        touches only the fields the Tamper Analysis work order specifies as
+        relevant to risk scoring — ``tampered``, ``confidence``,
+        ``reasons``, ``metadata``, and ``analysis_time_ms`` — leaving the
+        richer diagnostic fields (``anomalies``, ``detector_scores``,
+        ``visualization_path``, …) available in ``tamper_result.metadata``
+        for callers that want them, without this engine needing to
+        interpret them.
+
+        Contribution formula
+        ---------------------
+        ::
+
+            contribution_score = tamper_result.confidence  if tampered
+                                = 0.0                       otherwise
+
+        Rationale: ``confidence`` on a clean (``tampered=False``) verdict
+        reflects certainty that the image is *unmodified* — it is not a
+        risk signal, so it does not inflate the score. ``confidence`` on a
+        tampered verdict *is* the risk signal, so it flows straight through
+        to the weighted combination (see the work order's "increase the
+        score proportionally to tamper confidence" requirement).
+
+        Parameters
+        ----------
+        tamper_result : TamperResult | None
+            Output of the Tamper Analysis engine, or ``None`` if tamper
+            analysis was not run / not available for this image.
+
+        Returns
+        -------
+        dict[str, Any]
+            Keys:
+
+            * ``"applied"``            – ``bool``; ``False`` when
+              ``tamper_result`` is ``None`` — every other key is then a
+              neutral placeholder and callers should treat the tamper
+              component as *absent*, not *zero-risk*.
+            * ``"tampered"``           – ``bool``
+            * ``"confidence"``         – ``float`` in ``[0.0, 1.0]``
+            * ``"contribution_score"`` – ``float`` in ``[0.0, 1.0]``;
+              the value actually multiplied by
+              ``component_weights["tamper_analysis"]``.
+            * ``"reasons"``            – ``list[str]``
+            * ``"analysis_time_ms"``   – ``float``
+            * ``"metadata"``           – ``dict[str, Any]``
+        """
+        if tamper_result is None:
+            return {
+                "applied":            False,
+                "tampered":           False,
+                "confidence":         0.0,
+                "contribution_score": 0.0,
+                "reasons":            [],
+                "analysis_time_ms":   0.0,
+                "metadata":           {},
+            }
+
+        tampered   = bool(tamper_result.tampered)
+        confidence = max(0.0, min(1.0, float(tamper_result.confidence)))
+        contribution_score = confidence if tampered else 0.0
+
+        return {
+            "applied":            True,
+            "tampered":           tampered,
+            "confidence":         confidence,
+            "contribution_score": contribution_score,
+            "reasons":            list(tamper_result.reasons),
+            "analysis_time_ms":   float(tamper_result.analysis_time_ms),
+            "metadata":           dict(tamper_result.metadata),
         }
 
     # ------------------------------------------------------------------
@@ -1012,6 +1276,7 @@ def assess(
     config: RiskEngineConfig | None = None,
     image_id: str | None = None,
     extra_metadata: dict[str, Any] | None = None,
+    tamper_result: "TamperResult | None" = None,
 ) -> RiskResult:
     """Assess a QR detection result using a default :class:`RiskEngine`.
 
@@ -1034,6 +1299,10 @@ def assess(
         Source image identifier for audit traceability.
     extra_metadata : dict[str, Any], optional
         Additional annotations merged into ``RiskResult.metadata``.
+    tamper_result : TamperResult, optional
+        Optional Tamper Analysis output for the same image. See
+        :meth:`RiskEngine.assess` for the full contract; omitted by
+        default for backward compatibility.
 
     Returns
     -------
@@ -1056,6 +1325,7 @@ def assess(
         detection_result=detection_result,
         image_id=image_id,
         extra_metadata=extra_metadata,
+        tamper_result=tamper_result,
     )
 
 
