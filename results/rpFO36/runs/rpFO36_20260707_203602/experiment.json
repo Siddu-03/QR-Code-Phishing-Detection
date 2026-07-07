@@ -1,0 +1,26 @@
+{
+  "run_id": "rpFO36_20260707_203602",
+  "run_name": "rpFO36",
+  "timestamp": "20260707_203602",
+  "dataset_name": "rpFO36",
+  "dataset_path": "C:\\Users\\SIDDU\\AppData\\Local\\Temp\\qrshield_eval_luhq0kkv",
+  "dataset_type": "zip",
+  "dataset_hash": "01d50c76950d0d70adc019d082c8a8c7dbd23f893b6912bad5d7f6a74318f673",
+  "total_images": 98,
+  "categories_detected": [
+    "uncategorized"
+  ],
+  "worker_count": 16,
+  "execution_time": 1.9349432000008164,
+  "images_per_second": 50.6474815384548,
+  "duplicate_statistics": {
+    "unique_count": 98,
+    "duplicate_count": 0
+  },
+  "pipeline_version": "1.0.0",
+  "python_version": "3.14.5",
+  "opencv_version": "4.13.0",
+  "platform": "Windows 11",
+  "hostname": "LAPTOP-D2TTFURO",
+  "evaluation_framework_version": "1.1.0"
+}

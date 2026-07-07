@@ -1,0 +1,20 @@
+20:36:03 [WARNING] evaluation.dataset_loader — Skipping corrupted/unreadable image: C:\Users\SIDDU\AppData\Local\Temp\qrshield_eval_luhq0kkv\Last-active-2-months-ago-•-Report-abuse.png
+20:36:03 [INFO] evaluation — Duplicate detection: 98 unique image(s), 0 duplicate(s) skipped.
+20:36:03 [INFO] evaluation — Running evaluation with 16 worker(s) over 98 image(s) (0 already checkpointed).
+20:36:05 [INFO] evaluation — Evaluation finished in 2s (98/98 images processed, 0 via duplicate reuse).
+20:36:05 [INFO] evaluation.evaluate_dataset — CSV outputs written to results\rpFO36\runs\rpFO36_20260707_203602\csv
+20:36:05 [INFO] evaluation.evaluate_dataset — JSON outputs written to results\rpFO36\runs\rpFO36_20260707_203602\json
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\detection_rate_per_category.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\average_processing_time.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\confusion_matrix_qr_detection.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\confusion_matrix_risk_classification.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\risk_level_distribution.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\confidence_distribution.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\processing_time_histogram.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\detection_success_pie.png
+20:36:06 [INFO] evaluation.plots — Saved plot: results\rpFO36\runs\rpFO36_20260707_203602\charts\false_positive_vs_negative.png
+20:36:06 [INFO] evaluation.evaluate_dataset — Markdown report written to results\rpFO36\runs\rpFO36_20260707_203602\reports\Evaluation_Report.md
+20:36:06 [INFO] evaluation.evaluate_dataset — HTML report written to results\rpFO36\runs\rpFO36_20260707_203602\reports\Evaluation_Report.html
+20:36:06 [INFO] evaluation.gallery — Gallery populated: {'detected': 98, 'failed': 0, 'high_risk': 0, 'tampered': 0}
+20:36:06 [INFO] evaluation.evaluate_dataset — Experiment metadata written to results\rpFO36\runs\rpFO36_20260707_203602\experiment.json
+20:36:07 [INFO] evaluation.evaluate_dataset — latest/ synced to results\rpFO36\runs\rpFO36_20260707_203602 -> results\rpFO36\latest
