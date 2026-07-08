@@ -40,6 +40,30 @@ Those remain the responsibility of the desktop image pipeline; see
 ``analyze_security()`` below for the documented Week 4 URL Analyzer
 insertion point.
 
+Console output — event-driven, not frame-driven
+------------------------------------------------
+The console reports *state changes*, not frames. Per distinct decoded
+QR payload:
+
+    [QR DETECTED] 'payload'
+    [ANALYSIS] Running Tamper Analysis...
+    [RISK] SAFE / SUSPICIOUS / HIGH_RISK
+    [MONITORING] No further output while this QR remains visible.
+    ...
+    [QR LOST] 'payload' — cache expired after 0.7s without detection.
+
+While a payload's ``AnalysisCache`` entry is alive — which continuous
+detection maintains indefinitely, since every successful decode pushes
+its expiration deadline ``CACHE_TIMEOUT_SECONDS`` further out — nothing
+further is printed for it, no matter how many frames go by. Expiration
+is judged by elapsed wall-clock time, not a frame count, so it behaves
+identically at any frame rate and across camera sources (webcam, USB,
+RTSP/IP stream, video file). Multiple simultaneously visible QR codes
+are each tracked and announced independently. ``logger.info``/
+``logger.warning`` calls alongside these prints are unchanged and
+remain available for DEBUG-level troubleshooting; they fire at the
+same "new payload" event, never per-frame.
+
 Preprocessing on live frames — design decisions
 -----------------------------------------------
 Resize is always disabled (``resize_target=None``) for live frames.
@@ -71,6 +95,28 @@ cameras or stricter latency requirements, disable preprocessing.
 Usage
 -----
     python -m src.live_camera.live_scan
+    python -m src.live_camera.live_scan --enable-preprocessing
+    python -m src.live_camera.live_scan --disable-preprocessing
+    python -m src.live_camera.live_scan --camera-index 1
+    python -m src.live_camera.live_scan --camera-source "http://192.168.1.5:8080/video"
+    python -m src.live_camera.live_scan --camera-source path/to/video.mp4
+
+Camera acquisition
+------------------
+Frame acquisition (laptop webcam, USB webcam, IP/MJPEG camera stream,
+or local video file) is handled entirely by ``CameraStream`` — see
+``camera_stream.py`` in this package. This module never talks to
+``cv2.VideoCapture`` directly; it only ever calls
+``CameraStream.get_latest_frame()``, which always returns the newest
+frame available and silently discards any stale buffered ones. This is
+what eliminates the multi-second latency previously seen on IP-camera
+sources (see camera_stream.py's module docstring for why that
+buffering happened and how the fix works).
+
+Preprocessing defaults to the module-level ``ENABLE_PREPROCESSING``
+constant (``False``) when neither flag is given; the flags let it be
+toggled per-run without editing this file. The scanner prints its
+resolved mode ("Preprocessing: ENABLED"/"DISABLED") at startup.
 
 Controls
 --------
@@ -79,12 +125,20 @@ Controls
 
 from __future__ import annotations
 
+import argparse
 import logging
+import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import cv2
 import numpy as np
+
+# Low-latency camera acquisition — see camera_stream.py. live_scan.py no
+# longer talks to cv2.VideoCapture directly; all frame acquisition
+# (webcam, USB camera, IP/MJPEG stream, or video file) is delegated to
+# CameraStream, which discards stale buffered frames automatically.
+from src.live_camera.camera_stream import CameraSource, CameraStream
 
 # Reuse existing detection building blocks (no detection logic rewritten)
 from src.qr_detector.qr_detector import (
@@ -118,6 +172,11 @@ logger = logging.getLogger("live_camera.live_scan")
 # Constants — visual style matches draw_box.py
 # ---------------------------------------------------------------------------
 CAMERA_INDEX     = 0
+# CAMERA_SOURCE may additionally be a string: an IP-camera HTTP/MJPEG
+# stream URL (e.g. "http://192.168.1.5:8080/video") or a local video
+# file path. See CameraStream in camera_stream.py for details. When
+# None, CAMERA_INDEX is used instead (see _resolve_camera_source()).
+CAMERA_SOURCE: Optional[Union[int, str]] = None
 BOX_COLOUR_BGR   = (0, 255, 0)   # green — matches draw_box.py
 LABEL_COLOUR_BGR = (0, 0, 255)   # red   — matches draw_box.py
 OVERLAY_ALPHA    = 0.3
@@ -136,11 +195,16 @@ EXIT_KEY         = ord("q")
 # reused so the overlay can refresh every frame without re-running the
 # (comparatively expensive) analysis stages on each one.
 #
-# CACHE_MISS_FRAME_LIMIT: number of *consecutive* frames with no QR detected
-# before the cache is dropped. A small tolerance absorbs single-frame
-# detection flicker (motion blur, glare, momentary occlusion) without
-# forcing a full re-analysis the instant the code reappears.
-CACHE_MISS_FRAME_LIMIT: int = 10
+# CACHE_TIMEOUT_SECONDS: wall-clock seconds with no successful detection
+# of a given payload before its cache entry is dropped. A small tolerance
+# absorbs brief detection flicker (motion blur, glare, momentary
+# occlusion, a dropped network frame) without forcing a full re-analysis
+# the instant the code reappears. Timestamp-based (rather than a
+# consecutive-frame counter) so behaviour is identical regardless of
+# camera frame rate, network latency/jitter, dropped frames, or camera
+# source (webcam, USB, RTSP/IP stream, video file) — 0.7s of absence is
+# 0.7s of absence whether the pipeline is running at 5 fps or 60 fps.
+CACHE_TIMEOUT_SECONDS: float = 0.7
 
 # Risk-level → BGR colour used for the overlay text. RiskResult.risk_level
 # is one of RiskLevel.SAFE / SUSPICIOUS / HIGH_RISK (see risk_result.py).
@@ -371,44 +435,128 @@ _RISK_ENGINE = RiskEngine()
 
 
 @dataclass
-class AnalysisCache:
-    """Holds the most recent Tamper Analysis / Risk Assessment outcome.
-
-    The cache lets the live loop avoid re-running `TamperDetector.analyze()`
-    and `RiskEngine.assess()` on every frame — both are re-executed only
-    when the decoded QR payload changes, or after the payload has been
-    absent for `CACHE_MISS_FRAME_LIMIT` consecutive frames.
+class CacheEntry:
+    """Cached Tamper Analysis / Risk Assessment outcome for one QR payload.
 
     Attributes
     ----------
-    payload : str, optional
-        Decoded content of the QR code this cache entry belongs to.
-        ``None`` when nothing has been analyzed yet.
     tamper_result : TamperResult, optional
-        Cached Tamper Analysis output, or ``None`` if analysis failed /
-        has not run.
+        Cached Tamper Analysis output, or ``None`` if analysis failed.
     risk_result : RiskResult, optional
-        Cached Risk Assessment output, or ``None`` if assessment failed /
-        has not run.
-    miss_streak : int
-        Consecutive frames (since the cache was last refreshed) in which
-        no QR code was detected at all.
+        Cached Risk Assessment output, or ``None`` if assessment failed.
+    last_seen_time : float
+        ``time.monotonic()`` timestamp of the most recent frame in which
+        this payload was successfully detected. Updated every time the
+        payload is seen (see :meth:`AnalysisCache.refresh`); expiration
+        is judged purely from elapsed wall-clock time since this value,
+        never from a frame count — so it behaves identically regardless
+        of camera frame rate, network latency/jitter, dropped frames, or
+        camera source (webcam, USB, RTSP/IP stream, video file).
     """
 
-    payload: Optional[str] = None
     tamper_result: Optional[TamperResult] = None
     risk_result: Optional[RiskResult] = None
-    miss_streak: int = 0
+    last_seen_time: float = 0.0
+
+
+class AnalysisCache:
+    """Holds the most recent Tamper Analysis / Risk Assessment outcome
+    for every decoded QR payload currently (or recently) on screen.
+
+    The cache lets the live loop avoid re-running `TamperDetector.analyze()`
+    and `RiskEngine.assess()` on every frame — both are re-executed only
+    when a *new* decoded QR payload appears. Keying by decoded content
+    (rather than holding a single slot) means multiple simultaneously
+    visible QR codes are each analysed once and reused independently —
+    one code entering or leaving the frame never invalidates another
+    code's cached result.
+
+    Expiration is timestamp-based: each entry is dropped once
+    ``time.monotonic() - entry.last_seen_time`` exceeds ``timeout_seconds``
+    (default :data:`CACHE_TIMEOUT_SECONDS`). This is deliberately *not* a
+    consecutive-frame counter — a frame count implicitly assumes a
+    roughly constant frame rate, which does not hold across sources (a
+    laptop webcam at 30 fps vs. an RTSP/IP stream that stalls, jitters,
+    or briefly drops frames over the network vs. a video file decoded
+    faster or slower than real time). Using wall-clock elapsed time
+    instead means "0.7 seconds of absence" means the same thing — and
+    survives the same amount of real-world occlusion/flicker — no matter
+    which of those sources is in use or how its frame rate varies from
+    moment to moment.
+    """
+
+    def __init__(self, timeout_seconds: float = CACHE_TIMEOUT_SECONDS) -> None:
+        self.entries: dict[str, CacheEntry] = {}
+        self.timeout_seconds = timeout_seconds
+
+    def get(self, payload: str) -> Optional[CacheEntry]:
+        """Return the cached entry for *payload*, or ``None`` if absent."""
+        return self.entries.get(payload)
 
     def is_valid_for(self, payload: str) -> bool:
-        """True if this cache entry can be reused as-is for *payload*."""
-        return self.payload is not None and self.payload == payload
+        """True if a cache entry already exists for *payload*."""
+        return payload in self.entries
+
+    def store(
+        self,
+        payload: str,
+        tamper_result: Optional[TamperResult],
+        risk_result: Optional[RiskResult],
+        now: Optional[float] = None,
+    ) -> CacheEntry:
+        """Cache a freshly computed result for *payload* and return it.
+
+        *now*, if given, is the ``time.monotonic()`` timestamp to record
+        as this entry's initial ``last_seen_time``; defaults to the
+        current time when omitted.
+        """
+        entry = CacheEntry(
+            tamper_result=tamper_result,
+            risk_result=risk_result,
+            last_seen_time=now if now is not None else time.monotonic(),
+        )
+        self.entries[payload] = entry
+        return entry
+
+    def refresh(self, seen_payloads: set, now: Optional[float] = None) -> list:
+        """Update last-seen timestamps for *seen_payloads*; expire the rest.
+
+        For every payload currently in *seen_payloads*, its entry's
+        ``last_seen_time`` is bumped to *now* (so a continuously visible
+        QR code's cache stays alive indefinitely — every detection frame
+        pushes its expiration deadline back out by ``timeout_seconds``).
+        Any entry whose payload is NOT in *seen_payloads* and whose
+        elapsed time since ``last_seen_time`` has exceeded
+        ``timeout_seconds`` is dropped.
+
+        Parameters
+        ----------
+        seen_payloads : set
+            Decoded QR payloads detected on the current frame.
+        now : float, optional
+            ``time.monotonic()`` timestamp to treat as "now"; defaults
+            to the current time when omitted (tests may pass an
+            explicit value for deterministic timing).
+
+        Returns
+        -------
+        list
+            Payloads expired (dropped) by this call.
+        """
+        if now is None:
+            now = time.monotonic()
+
+        expired: list = []
+        for payload, entry in list(self.entries.items()):
+            if payload in seen_payloads:
+                entry.last_seen_time = now
+            elif (now - entry.last_seen_time) >= self.timeout_seconds:
+                del self.entries[payload]
+                expired.append(payload)
+        return expired
 
     def clear(self) -> None:
-        self.payload = None
-        self.tamper_result = None
-        self.risk_result = None
-        self.miss_streak = 0
+        self.entries.clear()
 
 
 def analyze_security(
@@ -465,23 +613,25 @@ def analyze_security(
 
 def draw_security_overlay(
     frame: np.ndarray,
-    cache: AnalysisCache,
+    entry: Optional[CacheEntry],
     is_cached: bool,
 ) -> np.ndarray:
     """Draw the Tamper Analysis / Risk Assessment status block.
 
-    Rendered every frame from whatever is currently in *cache* (live or
-    reused), so the overlay stays smooth even on frames where no new
-    analysis ran. Displays: Tamper Status, Tamper Confidence, Risk Level,
-    Risk Score, Recommendation, LIVE/CACHED indicator, and Processing Time.
-    Falls back to a grey "Unavailable" line for any stage that failed.
+    Rendered every frame from whatever *entry* currently holds (freshly
+    computed or reused from the cache), so the overlay stays smooth even
+    on frames where no new analysis ran. Displays: Tamper Status, Tamper
+    Confidence, Risk Level, Risk Score, Recommendation, LIVE/CACHED
+    indicator, and Processing Time. Falls back to a grey "Unavailable"
+    line for any stage that failed or hasn't run (``entry is None``).
 
     Parameters
     ----------
     frame : numpy.ndarray
         BGR frame to annotate (modified in place and returned).
-    cache : AnalysisCache
-        Current cache contents to render.
+    entry : CacheEntry, optional
+        The (primary) QR payload's current cache entry to render, or
+        ``None`` if nothing has been analysed / is still on screen.
     is_cached : bool
         ``True`` if this frame's values were reused from a prior analysis
         rather than freshly computed.
@@ -490,14 +640,17 @@ def draw_security_overlay(
     line_height = 24
     source_label = "CACHED" if is_cached else "LIVE"
 
-    if cache.tamper_result is None:
+    tamper_result = entry.tamper_result if entry is not None else None
+    risk_result = entry.risk_result if entry is not None else None
+
+    if tamper_result is None:
         cv2.putText(
             frame, f"Tamper: Unavailable ({source_label})", (10, y),
             FONT, 0.55, UNAVAILABLE_COLOUR_BGR, 2,
         )
         y += line_height
     else:
-        tr = cache.tamper_result
+        tr = tamper_result
         tamper_status = "TAMPERED" if tr.tampered else "CLEAN"
         tamper_colour = (0, 0, 255) if tr.tampered else (0, 200, 0)
         cv2.putText(
@@ -507,7 +660,7 @@ def draw_security_overlay(
         )
         y += line_height
 
-    if cache.risk_result is None:
+    if risk_result is None:
         cv2.putText(
             frame, "Risk: Unavailable", (10, y),
             FONT, 0.55, UNAVAILABLE_COLOUR_BGR, 2,
@@ -518,7 +671,7 @@ def draw_security_overlay(
             FONT, 0.5, UNAVAILABLE_COLOUR_BGR, 1,
         )
     else:
-        rr = cache.risk_result
+        rr = risk_result
         risk_colour = RISK_LEVEL_COLOURS_BGR.get(rr.risk_level, UNAVAILABLE_COLOUR_BGR)
         cv2.putText(
             frame,
@@ -586,30 +739,110 @@ def run_live_scan(
     int
         ``0`` on clean exit, ``1`` if the camera could not be opened.
     """
-    cap = cv2.VideoCapture(camera_index)
+def run_live_scan(
+    camera_index: int = CAMERA_INDEX,
+    enable_preprocessing: bool = ENABLE_PREPROCESSING,
+    camera_source: Optional[CameraSource] = None,
+) -> int:
+    """Open the camera stream and run continuous live QR scanning.
 
-    if not cap.isOpened():
-        logger.error("Could not open camera (index=%d).", camera_index)
-        print(f"❌ Error: Camera (index {camera_index}) could not be opened.")
+    Workflow (per frame)
+    --------------------
+    1. Capture raw frame (via ``CameraStream`` — always the newest frame
+       available, never a stale buffered one; see camera_stream.py).
+    2. [Optional] Preprocess: Gaussian + median denoise.
+       (resize always disabled; normalize always disabled to avoid double CLAHE)
+    3. Enhance via ``auto_enhance()``.
+       - ``try_blur`` is set to ``not enable_preprocessing`` to prevent
+         double Gaussian blurring when preprocessing is active.
+       - ``try_low_light`` is always True (brightness correction handled
+         entirely by auto_enhance; normalize is off in preprocessing).
+    4. Detect QR codes on the enhanced frame.
+    5. Draw boxes on the **raw captured** frame (coordinates are valid
+       because no resize was applied).
+    6. If a QR code is detected: run Tamper Analysis (on the **raw**
+       frame, never the preprocessed/enhanced one) and Risk Assessment
+       for the primary decoded payload — but only when that payload is
+       new or the analysis cache has expired; otherwise reuse the
+       cached `TamperResult` / `RiskResult`.
+    7. Display the QR status overlay and the Tamper/Risk security overlay
+       (the security overlay renders every frame from whatever is
+       currently cached, live or reused).
+    8. Show live feed.
+    9. Repeat until 'q' is pressed.
+
+    Parameters
+    ----------
+    camera_index : int
+        OpenCV camera index. Defaults to ``0`` (primary webcam). Ignored
+        if *camera_source* is given.
+    enable_preprocessing : bool
+        When ``True``, runs denoising before enhancement.  Adds ~1.5–3 ms
+        per frame at 720p.  Defaults to ``False``.
+    camera_source : int or str, optional
+        Explicit camera source: an OpenCV device index, an IP-camera
+        HTTP/MJPEG stream URL, or a local video file path. When
+        provided, this takes precedence over *camera_index*. When
+        ``None`` (the default), *camera_index* is used, preserving
+        the original webcam-only call signature.
+
+    Returns
+    -------
+    int
+        ``0`` on clean exit, ``1`` if the camera could not be opened.
+    """
+    resolved_source: CameraSource = (
+        camera_source if camera_source is not None else camera_index
+    )
+
+    stream = CameraStream(resolved_source)
+    stream.start()
+
+    if not stream.is_opened():
+        logger.error("Could not open camera source (%r).", resolved_source)
+        print(f"❌ Error: Camera source ({resolved_source!r}) could not be opened.")
+        stream.stop()
         return 1
 
     prep_state = "ENABLED" if enable_preprocessing else "DISABLED"
     logger.info("Live scan started — preprocessing: %s", prep_state)
     print(f"✅ Camera opened. Preprocessing: {prep_state}. Press 'q' to quit.")
 
-    # Tracks decoded content of QR codes currently visible on screen,
-    # used to suppress duplicate console prints.
-    seen_codes: set[str] = set()
+    # Detection-flicker tolerance and "have we already announced this
+    # payload" state both live in `cache` now (see AnalysisCache below):
+    # a payload is considered "new" for console purposes exactly when it
+    # has no live cache entry, which is also exactly when a fresh Tamper
+    # Analysis / Risk Assessment pass is required. A single dropped
+    # detection frame (motion blur, glare) does NOT remove the cache
+    # entry (see CACHE_TIMEOUT_SECONDS), so it no longer triggers a
+    # duplicate "[QR DETECTED]" print either — one payload, one
+    # announcement, for as long as it stays within its visibility
+    # timeout.
 
-    # Tamper Analysis / Risk Assessment cache — reused across frames while
-    # the same primary QR payload remains on screen (see AnalysisCache).
+    # Tamper Analysis / Risk Assessment cache — keyed by decoded QR
+    # payload, so each distinct code is analysed once and reused for as
+    # long as it (or any other code) remains on screen (see AnalysisCache).
     cache = AnalysisCache()
+
+    # Payload currently driving the security overlay. Kept "sticky" across
+    # brief detection flicker: it only changes when a new payload becomes
+    # primary, or is cleared once its cache entry actually expires.
+    displayed_payload: Optional[str] = None
 
     try:
         while True:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                logger.warning("Frame capture failed; skipping frame.")
+            frame = stream.get_latest_frame()
+            if frame is None:
+                if not stream.is_running():
+                    logger.error(
+                        "Camera stream stopped unexpectedly (source=%r).",
+                        resolved_source,
+                    )
+                    print("❌ Camera stream ended unexpectedly.")
+                    break
+                # No frame yet (e.g. right after start()) — brief wait
+                # instead of a hot spin, then retry.
+                time.sleep(0.01)
                 continue
 
             # ── Step 2: Optional preprocessing ────────────────────────────────
@@ -674,84 +907,139 @@ def run_live_scan(
             # in auto_enhance, resize_target=None in preprocessing).
             #
             # ── Step 6: Tamper Analysis + Risk Assessment (cached) ────────────
-            # Only the *primary* (first) detection drives Tamper Analysis /
-            # Risk Assessment and the caching below — the security overlay
-            # reports on one QR code at a time, matching AnalysisCache's
-            # single-payload contract. All decoded codes are still boxed
-            # and logged exactly as before.
+            # The security overlay reports on one QR code (the primary /
+            # first valid detection) at a time, but the underlying
+            # AnalysisCache is keyed by decoded content, so if multiple
+            # distinct QR codes are visible each is analysed at most once
+            # and reused independently — one code entering/leaving the
+            # frame never invalidates another's cached result. All
+            # decoded codes are still boxed and console-logged (see below),
+            # regardless of which one is currently "primary".
             is_cached = True
+            entry: Optional[CacheEntry] = None
+
             if result["detected"]:
                 draw_detections(frame, result)
-                current_codes: set[str] = set()
-                for det in result["detections"]:
-                    data = det["data"]
-                    bbox = tuple(det["bbox_tuple"])
-                    current_codes.add(data)
-                    if data not in seen_codes:
-                        print(
-                            f"[QR] {data!r}  bbox={bbox}  "
-                            f"detector={result['detector_used']}"
-                        )
-                seen_codes = current_codes
 
-                primary_payload = result["detections"][0]["data"]
-                cache.miss_streak = 0
-                is_cached = cache.is_valid_for(primary_payload)
+            # Empty/None decoded strings (OpenCV sometimes detects a QR's
+            # position but fails to decode its payload) are ignored for
+            # analysis purposes entirely — no Tamper Analysis, no Risk
+            # Assessment, no caching, no console print. The bounding box
+            # is still drawn above so the user can see *something* was
+            # detected.
+            valid_detections = [
+                det for det in result["detections"] if det["data"]
+            ] if result["detected"] else []
 
-                if not is_cached:
-                    # New payload (or cache previously expired) — run the
-                    # analysis stages once and cache the outcome. Uses the
-                    # ORIGINAL camera frame, never the preprocessed/enhanced
-                    # one (tamper cues live in the raw pixel data).
-                    tamper_result, risk_result = analyze_security(
-                        frame, result, primary_payload
+            current_codes: set[str] = {det["data"] for det in valid_detections}
+
+            # ── Step 6: Tamper Analysis + Risk Assessment (event-driven) ──────
+            # Every distinct decoded payload currently on screen is handled
+            # independently and analysed at most once: a payload with no
+            # live cache entry (first-ever appearance, OR a reappearance
+            # after its previous entry actually expired) gets exactly one
+            # Tamper Analysis + Risk Assessment pass and one console
+            # announcement here. A payload that already has a live cache
+            # entry is skipped entirely — no re-analysis, no re-print —
+            # whether it's the primary on-screen code or an additional one,
+            # so multiple simultaneously visible QR codes are each tracked
+            # and reported on their own independent timeline.
+            newly_analyzed: set[str] = set()
+
+            for det in valid_detections:
+                payload = det["data"]
+                if payload in cache.entries:
+                    continue  # already announced and still alive — silent
+
+                print(f"[QR DETECTED] {payload!r}")
+                print("[ANALYSIS] Running Tamper Analysis...")
+
+                # Uses the ORIGINAL camera frame, never the preprocessed/
+                # enhanced one (tamper cues live in the raw pixel data).
+                tamper_result, risk_result = analyze_security(frame, result, payload)
+                cache.store(payload, tamper_result, risk_result)
+                newly_analyzed.add(payload)
+
+                if tamper_result is not None:
+                    logger.info(
+                        "[Tamper] %r — %s (confidence=%.2f)",
+                        payload,
+                        "TAMPERED" if tamper_result.tampered else "clean",
+                        tamper_result.confidence,
                     )
-                    cache.payload = primary_payload
-                    cache.tamper_result = tamper_result
-                    cache.risk_result = risk_result
+                else:
+                    logger.warning(
+                        "[Tamper] %r — analysis unavailable", payload
+                    )
 
-                    if tamper_result is not None:
-                        logger.info(
-                            "[Tamper] %r — %s (confidence=%.2f)",
-                            primary_payload,
-                            "TAMPERED" if tamper_result.tampered else "clean",
-                            tamper_result.confidence,
-                        )
-                    else:
-                        logger.warning(
-                            "[Tamper] %r — analysis unavailable", primary_payload
-                        )
+                if risk_result is not None:
+                    print(f"[RISK] {risk_result.risk_level.value}")
+                    logger.info(
+                        "[Risk] %r — %s (score=%.1f) — %s",
+                        payload,
+                        risk_result.risk_level.value,
+                        risk_result.score,
+                        risk_result.recommendation,
+                    )
+                else:
+                    print("[RISK] unavailable")
+                    logger.warning(
+                        "[Risk] %r — assessment unavailable", payload
+                    )
 
-                    if risk_result is not None:
-                        logger.info(
-                            "[Risk] %r — %s (score=%.1f) — %s",
-                            primary_payload,
-                            risk_result.risk_level.value,
-                            risk_result.score,
-                            risk_result.recommendation,
-                        )
-                    else:
-                        logger.warning(
-                            "[Risk] %r — assessment unavailable", primary_payload
-                        )
-            else:
-                seen_codes = set()
-                # No QR this frame — count toward cache expiry rather than
-                # dropping the cache immediately, to absorb brief detection
-                # flicker (motion blur, glare, momentary occlusion).
-                if cache.payload is not None:
-                    cache.miss_streak += 1
-                    if cache.miss_streak >= CACHE_MISS_FRAME_LIMIT:
-                        logger.info(
-                            "[Cache] Expired after %d consecutive frames "
-                            "without a QR code.",
-                            cache.miss_streak,
-                        )
-                        cache.clear()
+                print(
+                    "[MONITORING] No further output while this QR remains "
+                    "visible."
+                )
+
+            if valid_detections:
+                # Only the *primary* (first) valid detection drives the
+                # on-screen security overlay — every decoded code is boxed
+                # and independently analysed/cached above, but the overlay
+                # has room for one status block at a time.
+                primary_payload = valid_detections[0]["data"]
+                displayed_payload = primary_payload
+
+                entry = cache.get(primary_payload)
+                is_cached = primary_payload not in newly_analyzed
+
+            # Update last-seen timestamps for every payload decoded this
+            # frame (including, when no valid QR was decoded at all,
+            # updating none); drop any entry whose payload has been
+            # absent for CACHE_TIMEOUT_SECONDS of *wall-clock* time. A
+            # small tolerance absorbs brief detection flicker (motion
+            # blur, glare, momentary occlusion, a dropped network frame)
+            # without forcing a full re-analysis the instant a code
+            # reappears — this is also exactly what keeps a
+            # continuously-visible QR code's cache alive indefinitely:
+            # every frame it's decoded on pushes its expiration deadline
+            # CACHE_TIMEOUT_SECONDS further into the future, regardless
+            # of how many (or how few) frames arrive per second.
+            expired = cache.refresh(current_codes)
+            if expired:
+                for lost_payload in expired:
+                    print(
+                        f"[QR LOST] {lost_payload!r} — cache expired after "
+                        f"{CACHE_TIMEOUT_SECONDS:.1f}s without detection."
+                    )
+                logger.info(
+                    "[Cache] Expired after %.1fs without a QR code: %s",
+                    CACHE_TIMEOUT_SECONDS,
+                    expired,
+                )
+            if displayed_payload in expired:
+                displayed_payload = None
+
+            if entry is None and displayed_payload is not None:
+                # No new/primary detection this frame — keep showing the
+                # last analysed payload's overlay for as long as its
+                # cache entry survives (reused, i.e. CACHED).
+                entry = cache.get(displayed_payload)
+                is_cached = True
 
             # ── Step 7: Status + security overlays, Step 8: display ───────────
             draw_status(frame, result, enhancement_technique, enable_preprocessing)
-            draw_security_overlay(frame, cache, is_cached)
+            draw_security_overlay(frame, entry, is_cached)
             cv2.imshow("Live QR Scan", frame)
 
             if cv2.waitKey(1) & 0xFF == EXIT_KEY:
@@ -761,11 +1049,72 @@ def run_live_scan(
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
     finally:
-        cap.release()
+        stream.stop()
         cv2.destroyAllWindows()
 
     return 0
 
 
+def _parse_args(argv: Optional[list] = None) -> "argparse.Namespace":
+    """Parse command-line arguments for the live scanner.
+
+    ``--enable-preprocessing`` / ``--disable-preprocessing`` let the
+    denoising pass (see :data:`ENABLE_PREPROCESSING` and the module
+    docstring) be toggled at runtime without editing this file. When
+    neither flag is given, the module-level ``ENABLE_PREPROCESSING``
+    default is used.
+    """
+    parser = argparse.ArgumentParser(
+        description="QR Shield — live webcam QR scanner.",
+    )
+    parser.add_argument(
+        "--camera-index",
+        type=int,
+        default=CAMERA_INDEX,
+        help=f"OpenCV camera index (default: {CAMERA_INDEX}). Ignored if "
+             "--camera-source is given.",
+    )
+    parser.add_argument(
+        "--camera-source",
+        type=str,
+        default=None,
+        help=(
+            "Camera source: an IP-camera HTTP/MJPEG stream URL (e.g. "
+            "'http://192.168.1.5:8080/video') or a local video file "
+            "path. Takes precedence over --camera-index when given."
+        ),
+    )
+    prep_group = parser.add_mutually_exclusive_group()
+    prep_group.add_argument(
+        "--enable-preprocessing",
+        dest="enable_preprocessing",
+        action="store_true",
+        default=None,
+        help=(
+            "Run the denoising preprocessing pass (Gaussian + median "
+            "blur, ~1.5-3 ms/frame at 720p) before enhancement. Useful "
+            "for noisy sensors / poor-quality USB cameras."
+        ),
+    )
+    prep_group.add_argument(
+        "--disable-preprocessing",
+        dest="enable_preprocessing",
+        action="store_false",
+        default=None,
+        help="Skip the denoising preprocessing pass (lowest-latency path).",
+    )
+    args = parser.parse_args(argv)
+    if args.enable_preprocessing is None:
+        args.enable_preprocessing = ENABLE_PREPROCESSING
+    return args
+
+
 if __name__ == "__main__":
-    raise SystemExit(run_live_scan())
+    _args = _parse_args()
+    raise SystemExit(
+        run_live_scan(
+            camera_index=_args.camera_index,
+            enable_preprocessing=_args.enable_preprocessing,
+            camera_source=_args.camera_source,
+        )
+    )
