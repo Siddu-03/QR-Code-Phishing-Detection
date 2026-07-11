@@ -97,6 +97,47 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
+# ---------------------------------------------------------------------------
+# Presentation formatting helpers
+# ---------------------------------------------------------------------------
+# Pure formatting only — no scoring/thresholding logic. TamperResult.confidence
+# and RiskResult.score/confidence are normalised floats in [0.0, 1.0]
+# internally (unchanged); these helpers are what every user-visible surface
+# (Markdown report, HTML fragment, summary sentence) goes through so
+# confidence is always a whole-number percentage and risk score is always
+# shown on a 0-100 scale, matching the Live Scanner and Evaluation Framework
+# report renderers.
+
+def _format_confidence_pct(confidence: float) -> str:
+    """Format a normalised [0.0, 1.0] confidence value as a whole-number percentage."""
+    return f"{confidence:.0%}"
+
+
+def _format_score_0_100(score: float) -> str:
+    """Format a normalised [0.0, 1.0] score on a 0-100 scale, one decimal."""
+    return f"{score * 100:.1f}/100"
+
+
+def _format_score_from_0_100(score: float) -> str:
+    """Format a score already expressed on a 0-100 scale, one decimal.
+
+    Used for URL Analyzer values (``risk_score``), which — unlike
+    ``RiskResult.score`` — are already produced on a 0-100 scale rather
+    than normalised to [0.0, 1.0].
+    """
+    return f"{float(score):.1f}/100"
+
+
+def _format_pct_from_0_100(value: float) -> str:
+    """Format a confidence value already expressed on a 0-100 scale as a percentage.
+
+    Used for URL Analyzer confidence, which is documented as a 0-100
+    percentage rather than a normalised [0.0, 1.0] float.
+    """
+    return f"{float(value):.0f}%"
+
+
 def _new_report_id() -> str:
     """Generate a short, collision-resistant report identifier.
 
@@ -315,7 +356,7 @@ class Report:
             "## Tamper Analysis Summary",
             "",
             f"- Tampered: {tamper.get('tampered')}",
-            f"- Confidence: {tamper.get('confidence', 0):.2%}",
+            f"- Confidence: {_format_confidence_pct(tamper.get('confidence', 0))}",
             f"- Anomalies detected: {tamper.get('anomaly_count', 0)}",
         ]
         for reason in tamper.get("reasons", []):
@@ -323,11 +364,27 @@ class Report:
 
         lines += [
             "",
+            "## URL Analysis Summary",
+            "",
+        ]
+        if url.get("available"):
+            lines += [
+                f"- Classification: {url.get('recommendation', 'n/a')}",
+                f"- URL score: {_format_score_from_0_100(url.get('risk_score', 0))}",
+                f"- Confidence: {_format_pct_from_0_100(url.get('confidence', 0))}",
+            ]
+            for reason in url.get("reasons", []):
+                lines.append(f"  - {reason}")
+        else:
+            lines.append("Not available for this scan.")
+
+        lines += [
+            "",
             "## Risk Assessment Summary",
             "",
             f"- Risk level: {risk.get('risk_level')}",
-            f"- Score: {risk.get('score', 0):.4f}",
-            f"- Confidence: {risk.get('confidence', 0):.2%}",
+            f"- Score: {_format_score_0_100(risk.get('score', 0))}",
+            f"- Confidence: {_format_confidence_pct(risk.get('confidence', 0))}",
         ]
         for reason in risk.get("reasons", []):
             lines.append(f"  - {reason}")
@@ -339,18 +396,6 @@ class Report:
             f"- Total pipeline time: {stats.get('total_pipeline_time_ms', 0):.1f} ms",
             f"- Tamper analysis time: {stats.get('tamper_analysis_time_ms', 0):.1f} ms",
             f"- Risk assessment time: {stats.get('risk_assessment_time_ms', 0):.1f} ms",
-        ]
-
-        lines += [
-            "",
-            "## Future URL Analysis",
-            "",
-            (
-                "Available."
-                if url.get("available")
-                else "Not yet available — reserved for the URL Analyzer "
-                "integration."
-            ),
         ]
 
         return "\n".join(lines)
@@ -370,9 +415,24 @@ class Report:
         qr = self.qr_information
         tamper = self.tamper_information
         risk = self.risk_information
+        url = self.extra_sections.get("url_analysis", {})
 
         reason_items = "".join(f"<li>{esc(r)}</li>" for r in tamper.get("reasons", []))
         risk_reason_items = "".join(f"<li>{esc(r)}</li>" for r in risk.get("reasons", []))
+
+        if url.get("available"):
+            url_reason_items = "".join(
+                f"<li>{esc(r)}</li>" for r in url.get("reasons", [])
+            )
+            url_section = (
+                f"<h2>URL Analysis</h2>"
+                f"<p>Classification: {esc(url.get('recommendation', 'n/a'))}, "
+                f"URL score: {_format_score_from_0_100(url.get('risk_score', 0))}, "
+                f"Confidence: {_format_pct_from_0_100(url.get('confidence', 0))}</p>"
+                f"<ul>{url_reason_items}</ul>"
+            )
+        else:
+            url_section = "<h2>URL Analysis</h2><p>Not available for this scan.</p>"
 
         return (
             f"<section class='qr-shield-report' data-report-id='{esc(self.report_id)}'>"
@@ -385,11 +445,12 @@ class Report:
             f"{esc(qr.get('detector_used', 'n/a'))}</p>"
             f"<h2>Tamper Analysis</h2>"
             f"<p>Tampered: {esc(tamper.get('tampered'))}, "
-            f"Confidence: {tamper.get('confidence', 0):.2%}</p>"
+            f"Confidence: {_format_confidence_pct(tamper.get('confidence', 0))}</p>"
             f"<ul>{reason_items}</ul>"
+            f"{url_section}"
             f"<h2>Risk Assessment</h2>"
             f"<p>Level: {esc(risk.get('risk_level'))}, "
-            f"Score: {risk.get('score', 0):.4f}</p>"
+            f"Score: {_format_score_0_100(risk.get('score', 0))}</p>"
             f"<ul>{risk_reason_items}</ul>"
             f"</section>"
         )
@@ -806,10 +867,10 @@ class ReportGenerator:
         return (
             f"Overall status: {overall_status.value}. {qr_clause}; "
             f"{tamper_clause} (confidence "
-            f"{tamper_information['confidence']:.0%}); risk level "
+            f"{_format_confidence_pct(tamper_information['confidence'])}); risk level "
             f"{risk_information['risk_level']} (score "
-            f"{risk_information['score']:.2f}, confidence "
-            f"{risk_information['confidence']:.0%})."
+            f"{_format_score_0_100(risk_information['score'])}, confidence "
+            f"{_format_confidence_pct(risk_information['confidence'])})."
         )
 
 

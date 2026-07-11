@@ -45,9 +45,20 @@ tamper contribution independently auditable in
 ``RiskResult.metadata["tamper_contribution"]``.
 
 See :meth:`RiskEngine._compute_tamper_contribution` for the exact
-contribution formula and the ``# FUTURE-URL`` comment blocks throughout
-this file for how a third (URL Analysis) component will slot into the
-same ``component_weights`` mechanism later.
+contribution formula.
+
+URL Analysis integration (current)
+------------------------------------
+``RiskEngine.assess`` (and :func:`assess`) now also accepts an optional
+``url_result: URLResult | None = None`` keyword argument, integrated by
+the same ``component_weights`` mechanism described above rather than a
+new one: see :meth:`RiskEngine._compute_url_contribution` for the exact
+contribution formula. As with Tamper Analysis, ``scoring.py`` and
+``rule_engine.py`` are unmodified — ``rule_engine.py`` already exposes
+generic ``url_mismatch`` / ``domain_spoofing`` anomaly-override keys via
+``RuleEngineConfig.critical_anomaly_keys``; this integration simply
+populates them with real, ``URLResult``-derived values instead of the
+placeholder ``False`` used previously.
 
 Pipeline position
 -----------------
@@ -55,7 +66,7 @@ Pipeline position
 
     qr_detector.py     ──► risk_engine.py ──► scoring.py    ──┐
     tamper_analysis/   ──►                    rule_engine.py ──┤──► RiskResult
-    (future) url_analyzer ──►                                ──┘
+    url_analyzer/      ──►                                ──┘
 
     risk_engine.py ──► FastAPI backend ──► Flutter mobile app
                    ──► Reporting module
@@ -82,13 +93,16 @@ Compatibility
 *  Python 3.11+.
 *  Depends on ``scoring.py``, ``rule_engine.py``, and ``risk_result.py``
    — all three are fully implemented as of Week 3, and are used *exactly*
-   as before; neither module was modified for Tamper Analysis integration.
+   as before; neither module was modified for Tamper Analysis or URL
+   Analysis integration.
 *  Optionally depends on ``src.tamper_analysis.tamper_result.TamperResult``
-   for type-hinting the new ``tamper_result`` parameter. This import is
-   guarded (``try/except ImportError``) so the module still imports
-   cleanly, and :meth:`RiskEngine.assess` still works in its original
-   QR-only mode, in environments where Tamper Analysis is not deployed.
-*  Zero imports from any URL-analysis module — not yet integrated by design.
+   for type-hinting the ``tamper_result`` parameter, and on
+   ``src.url_analyzer.url_result.URLResult`` for type-hinting the
+   ``url_result`` parameter. Both imports are guarded
+   (``try/except ImportError``) so the module still imports cleanly, and
+   :meth:`RiskEngine.assess` still works in its original QR-only mode, in
+   environments where Tamper Analysis and/or URL Analysis are not
+   deployed.
 *  ``qr_detector.py`` output is consumed as a plain ``dict``; no import of
    ``qr_detector`` is required.
 
@@ -159,6 +173,19 @@ except ImportError:  # pragma: no cover - defensive fallback only
     TamperResult = Any  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
+# URLResult integration (Week 4 URL Analysis module)
+# ---------------------------------------------------------------------------
+# ``URLResult`` is imported so that ``RiskEngine.assess`` can accept it as an
+# optional, strongly-typed keyword argument, exactly mirroring the
+# ``TamperResult`` pattern above. The import is guarded so this module still
+# imports cleanly — and behaves in its original QR-only mode — in
+# environments where the URL Analyzer module has not yet been deployed.
+try:
+    from src.url_analyzer.url_result import URLResult
+except ImportError:  # pragma: no cover - defensive fallback only
+    URLResult = Any  # type: ignore[assignment,misc]
+
+# ---------------------------------------------------------------------------
 # Module-level logger
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
@@ -209,26 +236,37 @@ class RiskEngineConfig:
         *components* (as opposed to the individual scoring *factors* inside
         ``scoring.py``) into the final composite risk score.
 
-        Defaults to ``{"qr_detection": 0.70, "tamper_analysis": 0.30,
-        "url_analysis": 0.0}``.
+        Defaults to ``{"qr_detection": 0.49, "tamper_analysis": 0.21,
+        "url_analysis": 0.30}``. The ``qr_detection`` : ``tamper_analysis``
+        ratio (7 : 3) is unchanged from the pre-URL-integration defaults —
+        both were simply scaled down by 0.70 to make room for the new
+        ``url_analysis`` weight, so a session with no ``TamperResult`` and
+        no ``URLResult`` still degrades to the original 100%-QR behaviour
+        (see the renormalisation rule below).
 
         * ``"qr_detection"`` — weight applied to the normalised
           ``ScoringEngine``/``RuleEngine`` output derived purely from the
-          QR detection result. This is the only component used today when
-          ``tamper_result`` is omitted from :meth:`RiskEngine.assess`.
+          QR detection result. This is the only component guaranteed to be
+          present on every call.
         * ``"tamper_analysis"`` — weight applied to the tamper-contribution
           score derived from an optional ``TamperResult`` (see
           :meth:`RiskEngine._compute_tamper_contribution`). Only used when
           a ``TamperResult`` is supplied.
-        * ``"url_analysis"`` — reserved at ``0.0`` for the future URL
-          Analysis stage (see module docstring, *future_pipeline*). Present
-          now so that adding URL Analysis later is a matter of setting a
-          non-zero weight here (and re-normalising the other two) rather
-          than reshaping the combination logic in :meth:`_run_assessment`.
+        * ``"url_analysis"`` — weight applied to the URL-contribution score
+          derived from an optional ``URLResult`` (see
+          :meth:`RiskEngine._compute_url_contribution`). Only used when a
+          ``URLResult`` is supplied.
 
-        The two currently-active weights (``qr_detection`` +
-        ``tamper_analysis``) are expected to sum to ``1.0``; this is
-        validated in :meth:`RiskEngine.__init__`.
+        All three weights are expected to sum to ``1.0``; this is validated
+        in :meth:`RiskEngine.__init__`. At combination time
+        (:meth:`RiskEngine._run_assessment`), only the weights of
+        *present* components are summed and used as the renormalisation
+        denominator — so omitting ``tamper_result`` and/or ``url_result``
+        on a given call does not silently shrink the composite score; the
+        remaining component(s) simply take up the full [0, 1] range in
+        their existing ratio. This is exactly the behaviour that already
+        existed for the QR/Tamper pair; URL Analysis now participates in
+        the same mechanism rather than a new one.
     """
 
     scoring_config:                      ScoringConfig    = field(
@@ -242,9 +280,9 @@ class RiskEngineConfig:
     include_rule_detail_in_metadata:     bool = True
     component_weights:                   dict[str, float] = field(
         default_factory=lambda: {
-            "qr_detection":    0.70,
-            "tamper_analysis": 0.30,
-            "url_analysis":    0.0,   # FUTURE-URL: reserved, currently unused
+            "qr_detection":    0.49,
+            "tamper_analysis": 0.21,
+            "url_analysis":    0.30,
         }
     )
 
@@ -284,18 +322,23 @@ class RiskEngine:
         self._scoring_engine = ScoringEngine(config=config.scoring_config)
         self._rule_engine    = RuleEngine(config=config.rule_config)
 
-        # Validate the currently-active component weights. ``url_analysis``
-        # is intentionally excluded from this check: it is a reserved,
-        # zero-weight placeholder until URL Analysis is integrated (see
-        # RiskEngineConfig.component_weights docstring).
+        # Validate the configured component weights. All three components
+        # (qr_detection, tamper_analysis, url_analysis) are now real,
+        # potentially-active weights — tamper_analysis and url_analysis
+        # simply have no effect on a given call when the corresponding
+        # TamperResult / URLResult is omitted (see the renormalisation
+        # logic in _run_assessment), so their configured weight still
+        # needs to be part of a coherent 1.0 total up front.
         active_weight_total = (
             config.component_weights.get("qr_detection", 0.0)
             + config.component_weights.get("tamper_analysis", 0.0)
+            + config.component_weights.get("url_analysis", 0.0)
         )
         if not (0.99 <= active_weight_total <= 1.01):
             raise ValueError(
                 "config.component_weights['qr_detection'] + "
-                "config.component_weights['tamper_analysis'] must sum to "
+                "config.component_weights['tamper_analysis'] + "
+                "config.component_weights['url_analysis'] must sum to "
                 f"1.0, got {active_weight_total!r}."
             )
 
@@ -324,6 +367,7 @@ class RiskEngine:
         image_id: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
         tamper_result: "TamperResult | None" = None,
+        url_result: "URLResult | None" = None,
     ) -> RiskResult:
         """Perform a complete risk assessment on a QR detection result.
 
@@ -366,7 +410,8 @@ class RiskEngine:
             ``"engine_version"``, ``"image_id"``, ``"detector_used"``,
             ``"qr_count"``, ``"qr_data"``, ``"score_breakdown"``,
             ``"rule_detail"``, ``"decision_explanation"``,
-            ``"scoring_explanation"``, ``"error"``, ``"tamper_contribution"``.
+            ``"scoring_explanation"``, ``"error"``, ``"tamper_contribution"``,
+            ``"url_contribution"``, ``"component_weights"``.
         tamper_result : TamperResult, optional
             Output of the Tamper Analysis engine
             (``src.tamper_analysis.tamper_result.TamperResult``) for the
@@ -387,6 +432,24 @@ class RiskEngine:
             ``tamper_result.analysis_time_ms`` are recorded under
             ``RiskResult.metadata["tamper_contribution"]`` for
             explainability and audit purposes.
+        url_result : URLResult, optional
+            Output of the URL Analyzer
+            (``src.url_analyzer.url_result.URLResult``) for the QR code's
+            decoded payload, if available. **Optional for backward
+            compatibility** -- omitted (``None``, the default) leaves URL
+            Analysis out of the score exactly as before this parameter
+            existed.
+
+            When provided, ``url_result.risk_score`` is combined with the
+            other active component(s) using the weights in
+            ``RiskEngineConfig.component_weights`` (see
+            :meth:`_compute_url_contribution` for the exact formula).
+            ``url_result.flags`` are merged into ``RiskResult.reasons``,
+            and derived domain/URL-shape indicators (IP-address host,
+            suspicious TLD, shortener, embedded credentials, invalid
+            syntax) feed the ``RuleEngine``'s existing ``url_mismatch`` /
+            ``domain_spoofing`` anomaly-override keys. Full detail is
+            recorded under ``RiskResult.metadata["url_contribution"]``.
 
         Returns
         -------
@@ -442,6 +505,7 @@ class RiskEngine:
                 extra_metadata=extra_metadata or {},
                 t_start=t_start,
                 tamper_result=tamper_result,
+                url_result=url_result,
             )
 
         except Exception as exc:  # noqa: BLE001
@@ -471,6 +535,7 @@ class RiskEngine:
         extra_metadata: dict[str, Any],
         t_start: float,
         tamper_result: "TamperResult | None" = None,
+        url_result: "URLResult | None" = None,
     ) -> RiskResult:
         """Internal pipeline — called by :meth:`assess`.
 
@@ -567,27 +632,60 @@ class RiskEngine:
                 tamper_detail["contribution_score"],
             )
 
-        # ── 6a. Combine QR-detection and Tamper-Analysis components ────────
-        # qr_unit / tamper_unit are both normalised to [0.0, 1.0] before
-        # weighting so the combination is scale-safe regardless of how
-        # scoring.py's internal [0, 100] range is configured.
+        # ── 6a. Compute the URL Analysis contribution ───────────────────────
+        # Returns an "inapplicable" detail dict (contribution_score=0.0)
+        # when url_result is None, so every downstream calculation below
+        # degrades to the original QR(+Tamper)-only behaviour automatically
+        # — mirrors _compute_tamper_contribution exactly.
+        url_detail = self._compute_url_contribution(url_result)
+
+        if url_detail["applied"]:
+            # Feed the real, URL-derived signals into the RuleEngine's
+            # existing url_mismatch / domain_spoofing anomaly-override keys.
+            # These keys were already part of RuleEngineConfig's
+            # critical_anomaly_keys and already handled generically by
+            # RuleEngine.evaluate() — they were simply always hardcoded to
+            # False here, pending URL Analysis integration. This is the fix
+            # for the observed bug: the rule-evaluation architecture already
+            # supported URL indicators; they were never populated.
+            anomaly_indicators = {
+                **anomaly_indicators,
+                "url_mismatch": url_detail["url_mismatch"],
+                "domain_spoofing": url_detail["domain_spoofing"],
+            }
+            logger.debug(
+                "RiskEngine — URL contribution: recommendation=%s, "
+                "risk_score=%d, contribution_score=%.4f",
+                url_detail["recommendation"],
+                url_detail["risk_score"],
+                url_detail["contribution_score"],
+            )
+
+        # ── 6b. Combine QR-detection, Tamper-Analysis and URL-Analysis ─────
+        # components. qr_unit / tamper / url contribution scores are all
+        # normalised to [0.0, 1.0] before weighting so the combination is
+        # scale-safe regardless of how scoring.py's internal [0, 100] range
+        # is configured. Only the weights of *present* components are
+        # summed as the renormalisation denominator (see
+        # :meth:`_combine_weighted`), so a call with no TamperResult and no
+        # URLResult degrades to exactly qr_unit (100% QR — byte-for-byte the
+        # pre-integration behaviour), a call with only one of the two
+        # optional components behaves exactly as it did before the other
+        # was introduced, and a call with both blends all three components
+        # in their configured ratio.
         qr_unit = self._normalise_score(score_breakdown.total_score)
         weights = self._config.component_weights
 
-        if tamper_detail["applied"]:
-            combined_unit = max(0.0, min(1.0, (
-                weights.get("qr_detection", 0.70) * qr_unit
-                + weights.get("tamper_analysis", 0.30)
-                  * tamper_detail["contribution_score"]
-            )))
-            # RuleEngine expects a [0, 100]-scale score, matching the scale
-            # score_breakdown.total_score already uses.
-            rule_engine_score = combined_unit * 100.0
-        else:
-            # No TamperResult supplied: pass the QR score through completely
-            # unmodified so the RuleEngine sees exactly what it always has.
-            combined_unit = qr_unit
-            rule_engine_score = score_breakdown.total_score
+        combined_unit = self._combine_weighted(
+            weights=weights,
+            qr_value=qr_unit,
+            tamper_detail=tamper_detail,
+            url_detail=url_detail,
+            value_key="contribution_score",
+        )
+        # RuleEngine expects a [0, 100]-scale score, matching the scale
+        # score_breakdown.total_score already uses.
+        rule_engine_score = combined_unit * 100.0
 
         # ── 7. Invoke RuleEngine ─────────────────────────────────────────────
         logger.debug(
@@ -627,8 +725,22 @@ class RiskEngine:
                 "reasons":             tamper_detail["reasons"],
                 "analysis_time_ms":    tamper_detail["analysis_time_ms"],
                 "tamper_metadata":     tamper_detail["metadata"],
-                "weight_applied":      weights.get("tamper_analysis", 0.30),
+                "weight_applied":      weights.get("tamper_analysis", 0.21),
             }
+        if url_detail["applied"]:
+            metadata["url_contribution"] = {
+                "recommendation":      url_detail["recommendation"],
+                "risk_score":          url_detail["risk_score"],
+                "contribution_score":  round(
+                    url_detail["contribution_score"], 4
+                ),
+                "confidence":          round(url_detail["confidence"], 4),
+                "reasons":             url_detail["reasons"],
+                "domain_spoofing":     url_detail["domain_spoofing"],
+                "url_mismatch":        url_detail["url_mismatch"],
+                "weight_applied":      weights.get("url_analysis", 0.30),
+            }
+        if tamper_detail["applied"] or url_detail["applied"]:
             metadata["component_weights"] = dict(weights)
 
         # ── 10. RiskLevel from rule_engine ───────────────────────────────────
@@ -639,31 +751,36 @@ class RiskEngine:
         risk_level = rule_result.risk_level
 
         # ── 11. Combine explanatory reasons ──────────────────────────────────
-        # Tamper reasons are appended (deduplicated, order-preserving) after
-        # the rule engine's own reasons so QR-derived explanations always
-        # come first, matching the 70/30 weighting priority.
+        # Tamper reasons, then URL reasons, are appended (deduplicated,
+        # order-preserving) after the rule engine's own reasons so
+        # QR-derived explanations always come first, matching the
+        # qr_detection component's priority in the weighting.
         combined_reasons = list(rule_result.reasons)
+        seen = set(combined_reasons)
         if tamper_detail["applied"] and tamper_detail["reasons"]:
-            seen = set(combined_reasons)
             for reason in tamper_detail["reasons"]:
+                if reason not in seen:
+                    combined_reasons.append(reason)
+                    seen.add(reason)
+        if url_detail["applied"] and url_detail["reasons"]:
+            for reason in url_detail["reasons"]:
                 if reason not in seen:
                     combined_reasons.append(reason)
                     seen.add(reason)
 
         # ── 12. Combine confidence ────────────────────────────────────────────
         qr_confidence = self._derive_confidence(score_breakdown, rule_result)
-        if tamper_detail["applied"]:
-            final_confidence = max(0.0, min(1.0, (
-                weights.get("qr_detection", 0.70) * qr_confidence
-                + weights.get("tamper_analysis", 0.30)
-                  * tamper_detail["confidence"]
-            )))
-        else:
-            final_confidence = qr_confidence
+        final_confidence = self._combine_weighted(
+            weights=weights,
+            qr_value=qr_confidence,
+            tamper_detail=tamper_detail,
+            url_detail=url_detail,
+            value_key="confidence",
+        )
 
         # ── 13. Construct RiskResult ─────────────────────────────────────────
         # score: combined_unit already lives in [0.0, 1.0] (== qr_unit,
-        # unchanged, when no TamperResult was supplied).
+        # unchanged, when no TamperResult and no URLResult were supplied).
         result = RiskResult(
             risk_level=risk_level,
             score=combined_unit,
@@ -1015,6 +1132,204 @@ class RiskEngine:
         }
 
     # ------------------------------------------------------------------
+    # URL Analysis contribution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_url_contribution(
+        url_result: "URLResult | None",
+    ) -> dict[str, Any]:
+        """Derive a normalised, weight-ready contribution from a URLResult.
+
+        This is the sole integration point between the URL Analyzer
+        module's output contract and the Risk Engine's composite scoring
+        step (see step 6b in :meth:`_run_assessment`) — it mirrors
+        :meth:`_compute_tamper_contribution` exactly, reusing the same
+        "applied" / neutral-placeholder pattern, so that a call with no
+        ``URLResult`` degrades automatically to the pre-integration
+        behaviour with no special-casing required elsewhere.
+
+        Contribution formula
+        ---------------------
+        ::
+
+            contribution_score = url_result.risk_score / 100.0
+
+        Rationale: unlike Tamper Analysis's binary tampered/clean split,
+        the URL Analyzer already produces a continuous ``risk_score`` on
+        ``[0, 100]`` that blends HTTPS/IP/shortener/TLD/keyword/entropy/
+        reputation signals (see ``url_analyzer.py``). That score *is* the
+        risk signal for every URL, safe or not, so it is used directly
+        (normalised to ``[0.0, 1.0]``) rather than gated behind a boolean
+        the way ``tampered`` gates the Tamper Analysis contribution.
+
+        This method also derives two boolean indicators — ``url_mismatch``
+        and ``domain_spoofing`` — from ``URLResult``'s existing per-check
+        fields, for the ``RuleEngine``'s anomaly-override path (see
+        ``RuleEngineConfig.critical_anomaly_keys``, which already includes
+        both keys). Both are kept deliberately narrow: a raw IP address or
+        a suspicious TLD *alone* is common enough (and already reflected in
+        ``contribution_score``) that treating it as a critical,
+        score-independent HIGH_RISK override would be overly aggressive.
+        Instead these two indicators fire only for patterns that are
+        specifically about impersonation / deception, matching what
+        ``domain_spoofing`` and ``url_mismatch`` actually mean:
+
+        * ``domain_spoofing`` — ``True`` when the URL is on the URL
+          Analyzer's blacklist (confirmed malicious domain), or when it
+          combines a brand/phishing-style keyword (e.g. "paypal", "login",
+          "verify" — see ``keyword_analysis.py``) with a domain-level
+          obfuscation technique (raw IP, suspicious TLD, or shortener) —
+          the classic "paypal-login.xyz" pattern of a domain dressed up to
+          look like a trusted brand.
+        * ``url_mismatch`` — ``True`` when the URL embeds credentials in
+          its authority component (e.g. ``https://real-bank.com@evil.com``,
+          where the visible-looking host and the actual host diverge) or
+          fails basic syntax validation.
+
+        Parameters
+        ----------
+        url_result : URLResult | None
+            Output of the URL Analyzer for the QR code's decoded payload,
+            or ``None`` if URL Analysis was not run / not available (no
+            decoded payload, non-URL payload, or a recoverable failure
+            upstream).
+
+        Returns
+        -------
+        dict[str, Any]
+            Keys:
+
+            * ``"applied"``            – ``bool``; ``False`` when
+              ``url_result`` is ``None`` — every other key is then a
+              neutral placeholder and callers should treat the URL
+              component as *absent*, not *zero-risk*.
+            * ``"risk_score"``         – ``int`` in ``[0, 100]`` (raw,
+              as produced by the URL Analyzer).
+            * ``"recommendation"``     – ``str | None``; ``"SAFE"`` |
+              ``"SUSPICIOUS"`` | ``"HIGH_RISK"``.
+            * ``"contribution_score"`` – ``float`` in ``[0.0, 1.0]``; the
+              value actually multiplied by
+              ``component_weights["url_analysis"]``.
+            * ``"confidence"``         – ``float`` in ``[0.0, 1.0]``
+              (``url_result.confidence`` is a ``0-100`` percentage).
+            * ``"reasons"``            – ``list[str]`` (``url_result.flags``).
+            * ``"domain_spoofing"``    – ``bool``.
+            * ``"url_mismatch"``       – ``bool``.
+        """
+        if url_result is None:
+            return {
+                "applied":            False,
+                "risk_score":         0,
+                "recommendation":     None,
+                "contribution_score": 0.0,
+                "confidence":         0.0,
+                "reasons":            [],
+                "domain_spoofing":    False,
+                "url_mismatch":       False,
+            }
+
+        contribution_score = max(
+            0.0, min(1.0, float(url_result.risk_score) / 100.0)
+        )
+        confidence = max(0.0, min(1.0, float(url_result.confidence) / 100.0))
+
+        obfuscation_technique = bool(
+            url_result.uses_ip
+            or url_result.suspicious_tld
+            or url_result.shortened
+        )
+        domain_spoofing = bool(
+            url_result.reputation == "BLACKLISTED"
+            or (bool(url_result.keywords) and obfuscation_technique)
+        )
+        url_mismatch = bool(
+            url_result.embedded_credentials or not url_result.valid_url
+        )
+
+        return {
+            "applied":            True,
+            "risk_score":         url_result.risk_score,
+            "recommendation":     url_result.recommendation,
+            "contribution_score": contribution_score,
+            "confidence":         confidence,
+            "reasons":            list(url_result.flags),
+            "domain_spoofing":    domain_spoofing,
+            "url_mismatch":       url_mismatch,
+        }
+
+    # ------------------------------------------------------------------
+    # Generalised component-weight combination
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _combine_weighted(
+        weights: dict[str, float],
+        qr_value: float,
+        tamper_detail: dict[str, Any],
+        url_detail: dict[str, Any],
+        value_key: str,
+    ) -> float:
+        """Combine QR / Tamper / URL component values by configured weight.
+
+        Generalises the QR+Tamper combination that existed prior to URL
+        Analysis integration to any subset of the three components being
+        present. Only the weights of components that are actually
+        *applied* on this call are summed as the renormalisation
+        denominator, so:
+
+        * QR only  → returns ``qr_value`` unchanged (matches the original
+          pre-Tamper, pre-URL behaviour exactly).
+        * QR + one optional component → returns the same result as the
+          two-component formula that existed before the other optional
+          component was introduced (their configured weight ratio is
+          preserved after renormalisation).
+        * QR + both optional components → blends all three in their
+          configured ratio.
+
+        Parameters
+        ----------
+        weights : dict[str, float]
+            ``RiskEngineConfig.component_weights``.
+        qr_value : float
+            The QR-detection component's value in ``[0.0, 1.0]`` (either
+            the normalised score or the derived confidence).
+        tamper_detail : dict[str, Any]
+            Output of :meth:`_compute_tamper_contribution`.
+        url_detail : dict[str, Any]
+            Output of :meth:`_compute_url_contribution`.
+        value_key : str
+            Which key to read off ``tamper_detail`` / ``url_detail`` —
+            ``"contribution_score"`` for score combination, or
+            ``"confidence"`` for confidence combination.
+
+        Returns
+        -------
+        float
+            Combined value, clamped to ``[0.0, 1.0]``.
+        """
+        numerator   = weights.get("qr_detection", 0.0) * qr_value
+        denominator = weights.get("qr_detection", 0.0)
+
+        if tamper_detail["applied"]:
+            numerator   += (
+                weights.get("tamper_analysis", 0.0) * tamper_detail[value_key]
+            )
+            denominator += weights.get("tamper_analysis", 0.0)
+
+        if url_detail["applied"]:
+            numerator   += weights.get("url_analysis", 0.0) * url_detail[value_key]
+            denominator += weights.get("url_analysis", 0.0)
+
+        if denominator <= 0.0:
+            # Defensive fallback: only reachable with a pathological
+            # all-zero weight config; pass the QR value through unchanged
+            # rather than dividing by zero.
+            return max(0.0, min(1.0, qr_value))
+
+        return max(0.0, min(1.0, numerator / denominator))
+
+    # ------------------------------------------------------------------
     # Score / confidence conversion helpers
     # ------------------------------------------------------------------
 
@@ -1277,6 +1592,7 @@ def assess(
     image_id: str | None = None,
     extra_metadata: dict[str, Any] | None = None,
     tamper_result: "TamperResult | None" = None,
+    url_result: "URLResult | None" = None,
 ) -> RiskResult:
     """Assess a QR detection result using a default :class:`RiskEngine`.
 
@@ -1303,6 +1619,10 @@ def assess(
         Optional Tamper Analysis output for the same image. See
         :meth:`RiskEngine.assess` for the full contract; omitted by
         default for backward compatibility.
+    url_result : URLResult, optional
+        Optional URL Analysis output for the same image. See
+        :meth:`RiskEngine.assess` for the full contract; omitted by
+        default for backward compatibility.
 
     Returns
     -------
@@ -1326,6 +1646,7 @@ def assess(
         image_id=image_id,
         extra_metadata=extra_metadata,
         tamper_result=tamper_result,
+        url_result=url_result,
     )
 
 
@@ -1409,10 +1730,16 @@ def _demo() -> None:  # pragma: no cover
             image_id=f"demo_{case['label'][:20].replace(' ', '_')}",
         )
         print(result.summary())
+        # Presentation only: score/confidence are normalised [0.0, 1.0]
+        # internally (unchanged) but shown here on the same user-visible
+        # scale used by the Report Generator, the Evaluation Framework, and
+        # the Live Scanner — 0-100 for score, whole-number percentage for
+        # confidence — so this demo's console output stays consistent with
+        # every other presentation surface.
         compact = {
             "risk_level":        result.risk_level.value,
-            "score":             round(result.score, 4),
-            "confidence":        round(result.confidence, 4),
+            "score":             f"{result.score * 100:.1f}/100",
+            "confidence":        f"{result.confidence:.0%}",
             "processing_ms":     round(result.processing_time_ms, 2),
             "reasons_count":     len(result.reasons),
             "engine_version":    result.metadata.get("engine_version"),

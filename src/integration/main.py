@@ -28,11 +28,12 @@ Pipeline steps
    when QR Detection produced one; all URL scoring/rule logic lives
    inside the URL Analyzer module itself. (Week 4)
 6. Risk Assessment: run RiskEngine.assess() using the QR
-   DetectionResult and the TamperResult; all weighting/scoring logic
-   lives inside RiskEngine. The URL Analysis result, when available, is
-   attached as read-only context via ``extra_metadata`` — RiskEngine's
-   own component-weight combination logic is untouched and not
-   duplicated here. (Week 3 + Week 4)
+   DetectionResult, the TamperResult, and the URLResult; all
+   weighting/scoring logic lives inside RiskEngine, which now combines
+   all three via its component-weight mechanism. It is also passed
+   through ``extra_metadata`` so ``RiskResult.metadata["url_analysis"]``
+   keeps carrying the full ``URLResult.to_dict()`` for ReportGenerator
+   and other consumers, unrelated to the scoring itself. (Week 3 + Week 4)
 7. Report Generation: assemble a unified Report via ReportGenerator,
    combining DetectionResult, TamperResult, RiskResult and the URL
    Analysis result. (Week 3 + Week 4)
@@ -43,15 +44,17 @@ Week 4 integration notes
 -------------------------
 URL Analysis now runs immediately after Tamper Analysis, at the spot
 previously documented with ``# FUTURE-URL`` markers. Its result (a
-``URLResult``) is threaded into ``RiskEngine.assess()`` via
-``extra_metadata`` — because ``RiskEngine``'s own ``url_analysis``
-component weight remains reserved at ``0.0`` (see
-``risk_engine.RiskEngineConfig``), so no risk-scoring logic is
-duplicated in this file — and into ``ReportGenerator.generate()`` via
-its existing ``url_analysis_result`` parameter. URL Analysis is an
-independently-recoverable stage, like Tamper Analysis: a failure never
-terminates the pipeline. The Evaluation Framework remains OUT OF SCOPE
-for this integration.
+``URLResult``) is threaded into ``RiskEngine.assess()`` as its own
+``url_result`` keyword argument, so ``RiskEngine``'s
+``component_weights["url_analysis"]`` (no longer reserved at ``0.0`` --
+see ``risk_engine.RiskEngineConfig``) actually contributes to
+``RiskResult.score`` / ``risk_level``; no risk-scoring logic is
+duplicated in this file. It is additionally passed through
+``extra_metadata`` and into ``ReportGenerator.generate()`` via its
+existing ``url_analysis_result`` parameter, purely for reporting. URL
+Analysis is an independently-recoverable stage, like Tamper Analysis: a
+failure never terminates the pipeline. The Evaluation Framework remains
+OUT OF SCOPE for this integration.
 
 Exit codes
 ----------
@@ -458,12 +461,15 @@ def step_risk_assessment(
     :class:`~src.risk_assessment.risk_engine.RiskEngine`; this helper only
     orchestrates the call — no risk calculation is duplicated here.
 
-    ``url_result``, when available, is attached as read-only context via
-    ``extra_metadata`` rather than fed into scoring: ``RiskEngine``'s own
-    ``component_weights["url_analysis"]`` remains reserved at ``0.0`` (see
-    ``RiskEngineConfig``), so URL Analysis does not influence
-    ``RiskResult.score`` until that weight is intentionally activated
-    inside ``risk_engine.py`` itself — this integration does not touch it.
+    ``url_result``, when available, is now passed straight through to
+    :meth:`RiskEngine.assess`'s ``url_result`` parameter, so it
+    contributes to ``RiskResult.score`` / ``risk_level`` via
+    ``RiskEngine``'s ``component_weights["url_analysis"]`` (see
+    ``RiskEngineConfig`` — no longer reserved at ``0.0``). It is
+    additionally attached as read-only context via ``extra_metadata``
+    purely so ``RiskResult.metadata["url_analysis"]`` keeps carrying the
+    full ``URLResult.to_dict()`` for other consumers (e.g.
+    ``ReportGenerator``).
 
     Parameters
     ----------
@@ -476,10 +482,13 @@ def step_risk_assessment(
         scoring in that case.
     url_result : URLResult, optional
         Result of :func:`step_url_analysis`. May be ``None`` if that stage
-        failed or was skipped (no decoded payload). When present, its
-        ``to_dict()`` is merged into ``RiskResult.metadata["url_analysis"]``
-        via ``extra_metadata`` — a key that does not clash with any of
-        ``RiskEngine.assess()``'s reserved metadata keys.
+        failed or was skipped (no decoded payload); ``RiskEngine.assess()``
+        falls back to QR(+Tamper)-only scoring in that case. When present,
+        it is fed into scoring via ``RiskEngine.assess(url_result=...)``,
+        and its ``to_dict()`` is also merged into
+        ``RiskResult.metadata["url_analysis"]`` via ``extra_metadata`` —
+        a key that does not clash with any of ``RiskEngine.assess()``'s
+        reserved metadata keys.
 
     Returns
     -------
@@ -491,12 +500,19 @@ def step_risk_assessment(
     """
     logger.info("Running risk assessment.")
     engine = create_default_engine()
+    # url_result is now threaded into RiskEngine.assess() as its own
+    # parameter (not just extra_metadata) so it actually contributes to
+    # RiskResult.score / risk_level via RiskEngine's component_weights
+    # mechanism -- see risk_engine.py's URL Analysis integration notes.
+    # It is *also* kept in extra_metadata for callers/report_generator
+    # that read RiskResult.metadata["url_analysis"] directly.
     extra_metadata = (
         {"url_analysis": url_result.to_dict()} if url_result is not None else None
     )
     risk_result = engine.assess(
         detection_result=detection_result,
         tamper_result=tamper_result,
+        url_result=url_result,
         extra_metadata=extra_metadata,
     )
     logger.info(
@@ -971,12 +987,11 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
         logger.exception("Recoverable error during URL analysis.")
 
     # ── Step 6: Risk Assessment (Week 3 + Week 4) ────────────────────────────
-    # Consumes DetectionResult and TamperResult; RiskEngine performs all
-    # weighting internally — no risk calculation is duplicated here.
-    # url_result, when available, is attached as read-only context via
-    # extra_metadata (see step_risk_assessment docstring) rather than fed
-    # into scoring, since RiskEngine's url_analysis component weight is
-    # still reserved at 0.0.
+    # Consumes DetectionResult, TamperResult and URLResult; RiskEngine
+    # performs all weighting internally — no risk calculation is
+    # duplicated here. url_result, when available, is fed into scoring via
+    # RiskEngine.assess(url_result=...) and is also attached as read-only
+    # context via extra_metadata (see step_risk_assessment docstring).
     # Independently recoverable: on failure, risk_result stays None.
     print("\n[6/9] Running risk assessment …")
     risk_result: Optional[RiskResult] = None

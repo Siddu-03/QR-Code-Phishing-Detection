@@ -25,10 +25,10 @@ Reuses the existing project pipeline:
                                         AnalysisCache)
     - src.risk_assessment.risk_engine : RiskEngine.assess() — run
                                         immediately after URL Analysis,
-                                        consuming the DetectionResult and
-                                        TamperResult, with the URLResult
-                                        (when available) attached as
-                                        read-only extra_metadata
+                                        consuming the DetectionResult,
+                                        TamperResult, and URLResult (when
+                                        available) as first-class inputs
+                                        to its component-weighted score
 
 Frame pipeline (per captured frame)
 ------------------------------------
@@ -54,13 +54,26 @@ Console output — event-driven, not frame-driven
 The console reports *state changes*, not frames. Per distinct decoded
 QR payload:
 
-    [QR DETECTED] 'payload'
-    [ANALYSIS] Running Tamper Analysis...
-    [URL] SAFE / SUSPICIOUS / HIGH_RISK (or 'unavailable')
-    [RISK] SAFE / SUSPICIOUS / HIGH_RISK
+    [QR DETECTED]
+    <decoded payload>
+
+    [TAMPER]
+    Status: CLEAN / TAMPERED (or 'Unavailable')
+    Confidence: <percentage>
+
+    [URL ANALYSIS]
+    Classification: SAFE / SUSPICIOUS / HIGH_RISK (or 'Unavailable')
+    URL Score: <0-100 scale>
+    Confidence: <percentage>
+
+    [FINAL RISK]
+    Risk Level: SAFE / SUSPICIOUS / HIGH_RISK (or 'Unavailable')
+    Final Score: <0-100 scale>
+    Recommendation: <text>
+
     [MONITORING] No further output while this QR remains visible.
     ...
-    [QR LOST] 'payload' — cache expired after 0.7s without detection.
+    [QR LOST] 'payload' — cache expired after 2.0s without detection.
 
 While a payload's ``AnalysisCache`` entry is alive — which continuous
 detection maintains indefinitely, since every successful decode pushes
@@ -222,9 +235,9 @@ EXIT_KEY         = ord("q")
 # the instant the code reappears. Timestamp-based (rather than a
 # consecutive-frame counter) so behaviour is identical regardless of
 # camera frame rate, network latency/jitter, dropped frames, or camera
-# source (webcam, USB, RTSP/IP stream, video file) — 0.7s of absence is
-# 0.7s of absence whether the pipeline is running at 5 fps or 60 fps.
-CACHE_TIMEOUT_SECONDS: float = 0.7
+# source (webcam, USB, RTSP/IP stream, video file) — 2.0s of absence is
+# 2.0s of absence whether the pipeline is running at 5 fps or 60 fps.
+CACHE_TIMEOUT_SECONDS: float = 2.0
 
 # Risk-level → BGR colour used for the overlay text. RiskResult.risk_level
 # is one of RiskLevel.SAFE / SUSPICIOUS / HIGH_RISK (see risk_result.py).
@@ -251,6 +264,56 @@ UNAVAILABLE_COLOUR_BGR = (160, 160, 160)  # grey — analysis unavailable
 # Recommended: False for clean cameras / real-time use.
 #              True  for noisy sensors or poor-quality USB cameras.
 ENABLE_PREPROCESSING: bool = False
+
+
+# ===========================================================================
+# Presentation formatting helpers
+# ===========================================================================
+# Pure formatting only — no scoring/thresholding logic lives here. These
+# exist so Tamper/Risk confidence and score values are always shown to the
+# user in the same units, matching the same convention used by
+# ``report_generator.py`` and the Evaluation Framework's report renderers.
+#
+#   * Confidence values (TamperResult.confidence, RiskResult.confidence) are
+#     normalised floats in [0.0, 1.0] internally; presented as a whole-number
+#     percentage, e.g. 0.653 -> "65%".
+#   * RiskResult.score is a normalised float in [0.0, 1.0] internally;
+#     presented on a 0-100 scale with one decimal, e.g. 0.653 -> "65.3/100".
+#   * URLResult.risk_score is already produced on a 0-100 scale; presented
+#     with one decimal for visual consistency with RiskResult's score,
+#     e.g. 45 -> "45.0/100".
+
+# Fixed-width separator rule used to frame every section of the
+# structured per-QR console report (see the event-driven print block in
+# run_live_scan below). Presentation-only constant — does not affect
+# analysis, caching, or logging behaviour.
+_SEPARATOR = "─" * 44
+
+
+def _format_confidence_pct(confidence: float) -> str:
+    """Format a normalised [0.0, 1.0] confidence value as a whole-number percentage."""
+    return f"{confidence:.0%}"
+
+
+def _format_pct_from_0_100(value: float) -> str:
+    """Format a confidence value already expressed on a 0-100 scale as a percentage.
+
+    URLResult.confidence is documented (see risk_engine.py's URL contribution
+    handling) as a 0-100 percentage rather than a normalised [0.0, 1.0]
+    float, so it takes its own helper rather than :func:`_format_confidence_pct`
+    to avoid a double percentage conversion.
+    """
+    return f"{float(value):.0f}%"
+
+
+def _format_unit_score_0_100(score: float) -> str:
+    """Format a normalised [0.0, 1.0] score on a 0-100 scale, one decimal."""
+    return f"{score * 100:.1f}/100"
+
+
+def _format_0_100_score(score: float) -> str:
+    """Format a score already on a 0-100 scale, one decimal, for display."""
+    return f"{float(score):.1f}/100"
 
 
 # ===========================================================================
@@ -442,11 +505,14 @@ def draw_status(
 #            → URL Analysis → Risk Assessment → Overlay → Display
 #
 # See ``step_url_analysis()`` and ``analyze_security()`` below.
-# ``RiskEngine.assess()``'s own ``url_analysis`` component weight remains
-# reserved at ``0.0`` (see ``risk_engine.RiskEngineConfig``), so the
-# ``URLResult`` is attached as read-only context via ``extra_metadata``
-# rather than fed into scoring — no risk-scoring logic is duplicated
-# here.
+# ``RiskEngine.assess()`` now accepts the ``URLResult`` directly as its
+# ``url_result`` parameter, so ``RiskEngine.assess()``'s own
+# ``url_analysis`` component weight (see ``risk_engine.RiskEngineConfig``,
+# no longer reserved at ``0.0``) actually contributes to the composite
+# score — no risk-scoring logic is duplicated here. The ``URLResult`` is
+# additionally attached as read-only context via ``extra_metadata`` for
+# any consumer that reads ``RiskResult.metadata["url_analysis"]``
+# directly.
 
 # Reuse a single detector / engine / analyzer instance for the lifetime of
 # the process (constructing these per-frame would be needless allocation
@@ -507,7 +573,7 @@ class AnalysisCache:
     laptop webcam at 30 fps vs. an RTSP/IP stream that stalls, jitters,
     or briefly drops frames over the network vs. a video file decoded
     faster or slower than real time). Using wall-clock elapsed time
-    instead means "0.7 seconds of absence" means the same thing — and
+    instead means "2.0 seconds of absence" means the same thing — and
     survives the same amount of real-world occlusion/flicker — no matter
     which of those sources is in use or how its frame rate varies from
     moment to moment.
@@ -670,12 +736,14 @@ def analyze_security(
     url_result = step_url_analysis(payload)
 
     try:
-        # url_result, when available, is attached as read-only context
-        # via extra_metadata rather than fed into scoring: RiskEngine's
-        # own component_weights["url_analysis"] remains reserved at 0.0
-        # (see RiskEngineConfig), so URL Analysis does not influence
-        # RiskResult.score here. "url_analysis" does not clash with any
-        # of RiskEngine.assess()'s reserved metadata keys.
+        # url_result is passed to RiskEngine.assess() as its own
+        # parameter so it actually contributes to RiskResult.score /
+        # risk_level via RiskEngine's component_weights mechanism (see
+        # risk_engine.py's URL Analysis integration notes). It is also
+        # kept in extra_metadata for any consumer that reads
+        # RiskResult.metadata["url_analysis"] directly; that key does
+        # not clash with any of RiskEngine.assess()'s reserved metadata
+        # keys.
         extra_metadata = (
             {"url_analysis": url_result.to_dict()}
             if url_result is not None
@@ -684,6 +752,7 @@ def analyze_security(
         risk_result = _RISK_ENGINE.assess(
             detection_result,
             tamper_result=tamper_result,
+            url_result=url_result,
             extra_metadata=extra_metadata,
         )
     except Exception as exc:  # noqa: BLE001 — keep stream alive
@@ -701,14 +770,18 @@ def draw_security_overlay(
     entry: Optional[CacheEntry],
     is_cached: bool,
 ) -> np.ndarray:
-    """Draw the Tamper Analysis / Risk Assessment status block.
+    """Draw the Tamper Analysis / URL Analysis / Risk Assessment status block.
 
     Rendered every frame from whatever *entry* currently holds (freshly
     computed or reused from the cache), so the overlay stays smooth even
-    on frames where no new analysis ran. Displays: Tamper Status, Tamper
-    Confidence, Risk Level, Risk Score, Recommendation, LIVE/CACHED
-    indicator, and Processing Time. Falls back to a grey "Unavailable"
-    line for any stage that failed or hasn't run (``entry is None``).
+    on frames where no new analysis ran. Displays, top to bottom: Tamper
+    Status + Confidence, URL Analysis Classification + Score + Confidence,
+    then the final Risk Level + Score + Recommendation + Processing Time.
+    URL Analysis is shown as its own block, independent of the final Risk
+    line, so it's clear what the URL Analyzer concluded on its own versus
+    what the combined risk decision ended up being. Falls back to a grey
+    "Unavailable" line for any stage that failed or hasn't run (``entry is
+    None``). LIVE/CACHED indicator is shown once, on the Tamper line.
 
     Parameters
     ----------
@@ -726,6 +799,7 @@ def draw_security_overlay(
     source_label = "CACHED" if is_cached else "LIVE"
 
     tamper_result = entry.tamper_result if entry is not None else None
+    url_result = entry.url_result if entry is not None else None
     risk_result = entry.risk_result if entry is not None else None
 
     if tamper_result is None:
@@ -740,8 +814,25 @@ def draw_security_overlay(
         tamper_colour = (0, 0, 255) if tr.tampered else (0, 200, 0)
         cv2.putText(
             frame,
-            f"Tamper: {tamper_status} (conf={tr.confidence:.0%}) [{source_label}]",
+            f"Tamper: {tamper_status} (conf={_format_confidence_pct(tr.confidence)}) "
+            f"[{source_label}]",
             (10, y), FONT, 0.55, tamper_colour, 2,
+        )
+        y += line_height
+
+    if url_result is None:
+        cv2.putText(
+            frame, "URL Analysis: Unavailable", (10, y),
+            FONT, 0.55, UNAVAILABLE_COLOUR_BGR, 2,
+        )
+        y += line_height
+    else:
+        ur = url_result
+        cv2.putText(
+            frame,
+            f"URL: {ur.recommendation} (score={_format_0_100_score(ur.risk_score)}, "
+            f"conf={_format_pct_from_0_100(ur.confidence)})",
+            (10, y), FONT, 0.55, (255, 255, 0), 2,
         )
         y += line_height
 
@@ -760,7 +851,8 @@ def draw_security_overlay(
         risk_colour = RISK_LEVEL_COLOURS_BGR.get(rr.risk_level, UNAVAILABLE_COLOUR_BGR)
         cv2.putText(
             frame,
-            f"Risk: {rr.risk_level.display_label} (score={rr.score:.1f})",
+            f"Risk: {rr.risk_level.display_label} "
+            f"(score={_format_unit_score_0_100(rr.score)})",
             (10, y), FONT, 0.55, risk_colour, 2,
         )
         y += line_height
@@ -1039,9 +1131,13 @@ def run_live_scan(
                 if payload in cache.entries:
                     continue  # already announced and still alive — silent
 
-                print(f"[QR DETECTED] {payload!r}")
-                print("[ANALYSIS] Running Tamper Analysis...")
-
+                # Console output is grouped into clearly separated sections
+                # — one per pipeline stage — so the reasoning behind the
+                # final risk decision (Tamper, then URL Analysis, then the
+                # combined Risk Assessment) is easy to scan independently.
+                # This is the same event ("new payload") that previously
+                # produced one print per stage; no additional lines are
+                # printed beyond what this grouping already carries.
                 # Uses the ORIGINAL camera frame, never the preprocessed/
                 # enhanced one (tamper cues live in the raw pixel data).
                 tamper_result, url_result, risk_result = analyze_security(
@@ -1050,7 +1146,26 @@ def run_live_scan(
                 cache.store(payload, tamper_result, url_result, risk_result)
                 newly_analyzed.add(payload)
 
+                # Console output is grouped into clearly separated sections
+                # — one per pipeline stage — so the reasoning behind the
+                # final risk decision (Tamper, then URL Analysis, then the
+                # combined Risk Assessment) is easy to scan independently.
+                # This is the same event ("new payload") that previously
+                # produced one print per stage; no additional lines are
+                # printed beyond what this grouping already carries — the
+                # logger.info/.warning calls fire at this same event, same
+                # as before, just alongside the reformatted print output.
+                print(_SEPARATOR)
+                print("QR DETECTED")
+                print("Payload")
+                print(payload)
+
+                print(_SEPARATOR)
+                print("TAMPER")
                 if tamper_result is not None:
+                    tamper_status = "Tampered" if tamper_result.tampered else "Clean"
+                    print(f"{'Status':<14}{tamper_status}")
+                    print(f"{'Confidence':<14}{_format_confidence_pct(tamper_result.confidence)}")
                     logger.info(
                         "[Tamper] %r — %s (confidence=%.2f)",
                         payload,
@@ -1058,15 +1173,18 @@ def run_live_scan(
                         tamper_result.confidence,
                     )
                 else:
+                    print(f"{'Status':<14}Unavailable")
+                    print(f"{'Confidence':<14}Unavailable")
                     logger.warning(
                         "[Tamper] %r — analysis unavailable", payload
                     )
 
+                print(_SEPARATOR)
+                print("URL ANALYSIS")
                 if url_result is not None:
-                    print(
-                        f"[URL] {url_result.recommendation} "
-                        f"(score={url_result.risk_score})"
-                    )
+                    print(f"{'Classification':<18}{url_result.recommendation}")
+                    print(f"{'Score':<18}{_format_0_100_score(url_result.risk_score)}")
+                    print(f"{'Confidence':<18}{_format_pct_from_0_100(url_result.confidence)}")
                     logger.info(
                         "[URL] %r — %s (score=%d, confidence=%.1f%%)",
                         payload,
@@ -1075,13 +1193,20 @@ def run_live_scan(
                         url_result.confidence,
                     )
                 else:
-                    print("[URL] unavailable")
+                    print(f"{'Classification':<18}Unavailable")
+                    print(f"{'Score':<18}Unavailable")
+                    print(f"{'Confidence':<18}Unavailable")
                     logger.warning(
                         "[URL] %r — analysis unavailable", payload
                     )
 
+                print(_SEPARATOR)
+                print("FINAL RISK")
                 if risk_result is not None:
-                    print(f"[RISK] {risk_result.risk_level.value}")
+                    print(f"{'Level':<18}{risk_result.risk_level.value}")
+                    print(f"{'Score':<18}{_format_unit_score_0_100(risk_result.score)}")
+                    print("Recommendation")
+                    print(risk_result.recommendation)
                     logger.info(
                         "[Risk] %r — %s (score=%.1f) — %s",
                         payload,
@@ -1090,11 +1215,15 @@ def run_live_scan(
                         risk_result.recommendation,
                     )
                 else:
-                    print("[RISK] unavailable")
+                    print(f"{'Level':<18}Unavailable")
+                    print(f"{'Score':<18}Unavailable")
+                    print("Recommendation")
+                    print("Unavailable")
                     logger.warning(
                         "[Risk] %r — assessment unavailable", payload
                     )
 
+                print(_SEPARATOR)
                 print(
                     "[MONITORING] No further output while this QR remains "
                     "visible."
