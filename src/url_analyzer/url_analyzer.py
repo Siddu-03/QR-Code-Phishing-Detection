@@ -5,18 +5,37 @@ This module combines all URL analysis components and generates
 a unified URLResult for Risk Assessment.
 """
 
-from parser import parse_url
-from validators import validate_url
-from domain_checks import (
-    is_ip_address,
-    is_shortened_url,
-    has_suspicious_tld,
-    has_embedded_credentials,
-)
-from keyword_analysis import detect_keywords
-from entropy import calculate_entropy
-from reputation import check_blacklist
-from url_result import URLResult
+try:
+    # Preferred: package-relative imports (used when imported as part of
+    # the `src.url_analyzer` package, e.g. via `python -m src.integration.main`)
+    from .parser import parse_url
+    from .validators import validate_url
+    from .domain_checks import (
+        is_ip_address,
+        is_shortened_url,
+        has_suspicious_tld,
+        has_embedded_credentials,
+    )
+    from .keyword_analysis import detect_keywords
+    from .entropy import calculate_entropy
+    from .reputation import check_blacklist
+    from .url_result import URLResult
+except ImportError:
+    # Fallback: absolute imports for backward compatibility when this
+    # module is executed directly as a standalone script
+    # (e.g. `python url_analyzer.py`) rather than as part of a package.
+    from parser import parse_url
+    from validators import validate_url
+    from domain_checks import (
+        is_ip_address,
+        is_shortened_url,
+        has_suspicious_tld,
+        has_embedded_credentials,
+    )
+    from keyword_analysis import detect_keywords
+    from entropy import calculate_entropy
+    from reputation import check_blacklist
+    from url_result import URLResult
 
 
 class URLAnalyzer:

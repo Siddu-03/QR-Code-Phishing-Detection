@@ -4,6 +4,8 @@ live_scan.py
 Live webcam QR scanning module.
 Week 2 – final production version.
 Week 3 update — Tamper Analysis and Risk Assessment integrated in-line.
+Week 4 update — URL Analysis integrated in-line, immediately after
+Tamper Analysis and before Risk Assessment.
 
 Reuses the existing project pipeline:
     - src.qr_detector.qr_detector    : detect_qr_opencv, detect_qr_pyzbar,
@@ -17,10 +19,16 @@ Reuses the existing project pipeline:
     - src.tamper_analysis.tamper_detector : TamperDetector.analyze() — run
                                         on the raw frame once a QR code is
                                         detected (see AnalysisCache)
+    - src.url_analyzer.url_analyzer  : URLAnalyzer.analyze() — run on the
+                                        decoded QR payload immediately
+                                        after Tamper Analysis (see
+                                        AnalysisCache)
     - src.risk_assessment.risk_engine : RiskEngine.assess() — run
-                                        immediately after Tamper Analysis,
-                                        consuming both DetectionResult and
-                                        TamperResult
+                                        immediately after URL Analysis,
+                                        consuming the DetectionResult and
+                                        TamperResult, with the URLResult
+                                        (when available) attached as
+                                        read-only extra_metadata
 
 Frame pipeline (per captured frame)
 ------------------------------------
@@ -30,15 +38,16 @@ Frame pipeline (per captured frame)
         → detect_qr_frame()
         → draw_detections() / draw_status()
         → [TamperDetector.analyze() on the RAW frame]   ← only if QR found
+        → [URLAnalyzer.analyze() on the decoded payload]← only if QR found
         → [RiskEngine.assess()]                         ← only if QR found
         → draw_security_overlay()
         → cv2.imshow()
 
-This module intentionally does NOT perform URL Analysis, report
-generation, JSON/Markdown export, or evaluation-framework statistics.
-Those remain the responsibility of the desktop image pipeline; see
-``analyze_security()`` below for the documented Week 4 URL Analyzer
-insertion point.
+This module intentionally does NOT perform report generation,
+JSON/Markdown export, or evaluation-framework statistics. Those remain
+the responsibility of the desktop image pipeline; see
+``analyze_security()`` below for where Tamper Analysis, URL Analysis
+and Risk Assessment are chained together.
 
 Console output — event-driven, not frame-driven
 ------------------------------------------------
@@ -47,6 +56,7 @@ QR payload:
 
     [QR DETECTED] 'payload'
     [ANALYSIS] Running Tamper Analysis...
+    [URL] SAFE / SUSPICIOUS / HIGH_RISK (or 'unavailable')
     [RISK] SAFE / SUSPICIOUS / HIGH_RISK
     [MONITORING] No further output while this QR remains visible.
     ...
@@ -158,6 +168,16 @@ from src.tamper_analysis.tamper_detector import TamperDetector
 from src.tamper_analysis.tamper_result import TamperResult
 from src.risk_assessment.risk_engine import RiskEngine
 from src.risk_assessment.risk_result import RiskLevel, RiskResult
+
+# Week 4 module — URL Analysis (reused, not rewritten)
+# NOTE: url_analyzer.py's own package location was not specified by the
+# Week 4 work order. It is assumed to live alongside its sibling packages
+# as ``src.url_analyzer``, consistent with ``src.tamper_analysis`` and
+# ``src.risk_assessment`` above (and with the same assumption already
+# made for the desktop pipeline's main.py). If your repository places it
+# elsewhere, this is the only import line that needs to change.
+from src.url_analyzer.url_analyzer import URLAnalyzer
+from src.url_analyzer.url_result import URLResult
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -409,39 +429,45 @@ def draw_status(
 
 
 # ===========================================================================
-# Tamper Analysis / Risk Assessment
+# Tamper Analysis / URL Analysis / Risk Assessment
 # ===========================================================================
 #
-# Insertion point for future Week 4 integration
-# ----------------------------------------------
-# The Week 4 URL Analyzer slots in immediately AFTER Tamper Analysis and
-# BEFORE Risk Assessment, turning the pipeline into:
+# Week 4 integration
+# -------------------
+# The URL Analyzer now slots in immediately AFTER Tamper Analysis and
+# BEFORE Risk Assessment, exactly as previously documented at this
+# insertion point:
 #
 #     Camera → Preprocessing → Enhancement → Detection → Tamper
 #            → URL Analysis → Risk Assessment → Overlay → Display
 #
-# Concretely, that will mean: inside `analyze_security()` below, call the
-# (future) `URLAnalyzer.analyze(decoded_payload)` right after
-# `tamper_detector.analyze(raw_frame)` succeeds, and pass its result to
-# `risk_engine.assess(...)` alongside `tamper_result` (the engine's
-# `assess()` signature already anticipates additional optional inputs).
-# No other function in this module should need to change.
+# See ``step_url_analysis()`` and ``analyze_security()`` below.
+# ``RiskEngine.assess()``'s own ``url_analysis`` component weight remains
+# reserved at ``0.0`` (see ``risk_engine.RiskEngineConfig``), so the
+# ``URLResult`` is attached as read-only context via ``extra_metadata``
+# rather than fed into scoring — no risk-scoring logic is duplicated
+# here.
 
-# Reuse a single detector / engine instance for the lifetime of the process
-# (constructing these per-frame would be needless allocation and defeats
-# any internal setup cost amortisation).
+# Reuse a single detector / engine / analyzer instance for the lifetime of
+# the process (constructing these per-frame would be needless allocation
+# and defeats any internal setup cost amortisation).
 _TAMPER_DETECTOR = TamperDetector()
+_URL_ANALYZER = URLAnalyzer()
 _RISK_ENGINE = RiskEngine()
 
 
 @dataclass
 class CacheEntry:
-    """Cached Tamper Analysis / Risk Assessment outcome for one QR payload.
+    """Cached Tamper Analysis / URL Analysis / Risk Assessment outcome for
+    one QR payload.
 
     Attributes
     ----------
     tamper_result : TamperResult, optional
         Cached Tamper Analysis output, or ``None`` if analysis failed.
+    url_result : URLResult, optional
+        Cached URL Analysis output, or ``None`` if analysis failed or was
+        skipped (no decoded payload — see :func:`step_url_analysis`).
     risk_result : RiskResult, optional
         Cached Risk Assessment output, or ``None`` if assessment failed.
     last_seen_time : float
@@ -455,21 +481,23 @@ class CacheEntry:
     """
 
     tamper_result: Optional[TamperResult] = None
+    url_result: Optional[URLResult] = None
     risk_result: Optional[RiskResult] = None
     last_seen_time: float = 0.0
 
 
 class AnalysisCache:
-    """Holds the most recent Tamper Analysis / Risk Assessment outcome
-    for every decoded QR payload currently (or recently) on screen.
+    """Holds the most recent Tamper Analysis / URL Analysis / Risk
+    Assessment outcome for every decoded QR payload currently (or
+    recently) on screen.
 
-    The cache lets the live loop avoid re-running `TamperDetector.analyze()`
-    and `RiskEngine.assess()` on every frame — both are re-executed only
-    when a *new* decoded QR payload appears. Keying by decoded content
-    (rather than holding a single slot) means multiple simultaneously
-    visible QR codes are each analysed once and reused independently —
-    one code entering or leaving the frame never invalidates another
-    code's cached result.
+    The cache lets the live loop avoid re-running `TamperDetector.analyze()`,
+    `URLAnalyzer.analyze()` and `RiskEngine.assess()` on every frame — all
+    three are re-executed only when a *new* decoded QR payload appears.
+    Keying by decoded content (rather than holding a single slot) means
+    multiple simultaneously visible QR codes are each analysed once and
+    reused independently — one code entering or leaving the frame never
+    invalidates another code's cached result.
 
     Expiration is timestamp-based: each entry is dropped once
     ``time.monotonic() - entry.last_seen_time`` exceeds ``timeout_seconds``
@@ -501,6 +529,7 @@ class AnalysisCache:
         self,
         payload: str,
         tamper_result: Optional[TamperResult],
+        url_result: Optional[URLResult],
         risk_result: Optional[RiskResult],
         now: Optional[float] = None,
     ) -> CacheEntry:
@@ -512,6 +541,7 @@ class AnalysisCache:
         """
         entry = CacheEntry(
             tamper_result=tamper_result,
+            url_result=url_result,
             risk_result=risk_result,
             last_seen_time=now if now is not None else time.monotonic(),
         )
@@ -559,18 +589,54 @@ class AnalysisCache:
         self.entries.clear()
 
 
+def step_url_analysis(payload: str) -> Optional[URLResult]:
+    """Run URL Analysis on a decoded QR payload. (Week 4)
+
+    Fail-safe from the caller's perspective, exactly like the other
+    stages in :func:`analyze_security`: any internal exception is caught
+    and logged here so a single malformed payload can never terminate
+    the live scanner. All URL parsing, scoring and rule evaluation lives
+    inside :class:`~src.url_analyzer.url_analyzer.URLAnalyzer` — nothing
+    is duplicated here.
+
+    Parameters
+    ----------
+    payload : str
+        Decoded content of a QR code. Callers only ever reach this
+        function with non-empty payloads (see ``valid_detections`` in
+        :func:`run_live_scan`, which already filters out empty/None
+        decodes before any analysis stage runs), but an explicit guard
+        is kept here too since this is also a standalone public helper.
+
+    Returns
+    -------
+    URLResult or None
+        ``None`` when *payload* is empty/unavailable, or when
+        :meth:`URLAnalyzer.analyze` raises.
+    """
+    if not payload:
+        return None
+
+    try:
+        return _URL_ANALYZER.analyze(payload)
+    except Exception as exc:  # noqa: BLE001 — keep stream alive
+        logger.warning("URL Analysis failed for %r: %s", payload, exc)
+        return None
+
+
 def analyze_security(
     raw_frame: np.ndarray,
     detection_result: dict,
     payload: str,
-) -> Tuple[Optional[TamperResult], Optional[RiskResult]]:
-    """Run Tamper Analysis followed immediately by Risk Assessment.
+) -> Tuple[Optional[TamperResult], Optional[URLResult], Optional[RiskResult]]:
+    """Run Tamper Analysis, then URL Analysis, then Risk Assessment.
 
-    Both stages are fail-safe from the caller's perspective: any internal
-    exception is caught and logged here so a single bad frame can never
-    terminate the live scanner. On failure the corresponding result is
-    ``None``, and the caller (the overlay) is expected to render
-    "Unavailable" in its place.
+    All three stages are fail-safe from the caller's perspective: any
+    internal exception is caught and logged here (or, for URL Analysis,
+    inside :func:`step_url_analysis`) so a single bad frame or payload
+    can never terminate the live scanner. On failure the corresponding
+    result is ``None``, and the caller (the overlay) is expected to
+    render "Unavailable" in its place.
 
     Parameters
     ----------
@@ -581,14 +647,16 @@ def analyze_security(
         Output of :func:`detect_qr_frame` (the `DetectionResult` contract
         consumed by `RiskEngine.assess`).
     payload : str
-        Decoded content of the (primary) detected QR code — used only for
-        log messages here; caching is handled by the caller.
+        Decoded content of the (primary) detected QR code — passed
+        directly to the URL Analyzer, and otherwise used only for log
+        messages here; caching is handled by the caller.
 
     Returns
     -------
-    tuple[TamperResult | None, RiskResult | None]
+    tuple[TamperResult | None, URLResult | None, RiskResult | None]
     """
     tamper_result: Optional[TamperResult] = None
+    url_result: Optional[URLResult] = None
     risk_result: Optional[RiskResult] = None
 
     try:
@@ -596,15 +664,32 @@ def analyze_security(
     except Exception as exc:  # noqa: BLE001 — keep stream alive
         logger.warning("Tamper Analysis failed for %r: %s", payload, exc)
 
+    # URL Analysis runs on the decoded payload regardless of whether
+    # Tamper Analysis itself succeeded — same independently-recoverable
+    # treatment already given to Tamper Analysis and Risk Assessment.
+    url_result = step_url_analysis(payload)
+
     try:
+        # url_result, when available, is attached as read-only context
+        # via extra_metadata rather than fed into scoring: RiskEngine's
+        # own component_weights["url_analysis"] remains reserved at 0.0
+        # (see RiskEngineConfig), so URL Analysis does not influence
+        # RiskResult.score here. "url_analysis" does not clash with any
+        # of RiskEngine.assess()'s reserved metadata keys.
+        extra_metadata = (
+            {"url_analysis": url_result.to_dict()}
+            if url_result is not None
+            else None
+        )
         risk_result = _RISK_ENGINE.assess(
             detection_result,
             tamper_result=tamper_result,
+            extra_metadata=extra_metadata,
         )
     except Exception as exc:  # noqa: BLE001 — keep stream alive
         logger.warning("Risk Assessment failed for %r: %s", payload, exc)
 
-    return tamper_result, risk_result
+    return tamper_result, url_result, risk_result
 
 
 # ===========================================================================
@@ -716,10 +801,11 @@ def run_live_scan(
     5. Draw boxes on the **raw captured** frame (coordinates are valid
        because no resize was applied).
     6. If a QR code is detected: run Tamper Analysis (on the **raw**
-       frame, never the preprocessed/enhanced one) and Risk Assessment
-       for the primary decoded payload — but only when that payload is
-       new or the analysis cache has expired; otherwise reuse the
-       cached `TamperResult` / `RiskResult`.
+       frame, never the preprocessed/enhanced one), then URL Analysis on
+       the decoded payload, then Risk Assessment — for the primary
+       decoded payload — but only when that payload is new or the
+       analysis cache has expired; otherwise reuse the cached
+       `TamperResult` / `URLResult` / `RiskResult`.
     7. Display the QR status overlay and the Tamper/Risk security overlay
        (the security overlay renders every frame from whatever is
        currently cached, live or reused).
@@ -761,10 +847,11 @@ def run_live_scan(
     5. Draw boxes on the **raw captured** frame (coordinates are valid
        because no resize was applied).
     6. If a QR code is detected: run Tamper Analysis (on the **raw**
-       frame, never the preprocessed/enhanced one) and Risk Assessment
-       for the primary decoded payload — but only when that payload is
-       new or the analysis cache has expired; otherwise reuse the
-       cached `TamperResult` / `RiskResult`.
+       frame, never the preprocessed/enhanced one), then URL Analysis on
+       the decoded payload, then Risk Assessment — for the primary
+       decoded payload — but only when that payload is new or the
+       analysis cache has expired; otherwise reuse the cached
+       `TamperResult` / `URLResult` / `RiskResult`.
     7. Display the QR status overlay and the Tamper/Risk security overlay
        (the security overlay renders every frame from whatever is
        currently cached, live or reused).
@@ -819,9 +906,10 @@ def run_live_scan(
     # announcement, for as long as it stays within its visibility
     # timeout.
 
-    # Tamper Analysis / Risk Assessment cache — keyed by decoded QR
-    # payload, so each distinct code is analysed once and reused for as
-    # long as it (or any other code) remains on screen (see AnalysisCache).
+    # Tamper Analysis / URL Analysis / Risk Assessment cache — keyed by
+    # decoded QR payload, so each distinct code is analysed once and
+    # reused for as long as it (or any other code) remains on screen
+    # (see AnalysisCache).
     cache = AnalysisCache()
 
     # Payload currently driving the security overlay. Kept "sticky" across
@@ -906,7 +994,7 @@ def run_live_scan(
             # raw-frame space because no resize was applied (try_rotation=False
             # in auto_enhance, resize_target=None in preprocessing).
             #
-            # ── Step 6: Tamper Analysis + Risk Assessment (cached) ────────────
+            # ── Step 6: Tamper Analysis + URL Analysis + Risk Assessment (cached) ────────────
             # The security overlay reports on one QR code (the primary /
             # first valid detection) at a time, but the underlying
             # AnalysisCache is keyed by decoded content, so if multiple
@@ -933,7 +1021,7 @@ def run_live_scan(
 
             current_codes: set[str] = {det["data"] for det in valid_detections}
 
-            # ── Step 6: Tamper Analysis + Risk Assessment (event-driven) ──────
+            # ── Step 6: Tamper Analysis + URL Analysis + Risk Assessment (event-driven) ──────
             # Every distinct decoded payload currently on screen is handled
             # independently and analysed at most once: a payload with no
             # live cache entry (first-ever appearance, OR a reappearance
@@ -956,8 +1044,10 @@ def run_live_scan(
 
                 # Uses the ORIGINAL camera frame, never the preprocessed/
                 # enhanced one (tamper cues live in the raw pixel data).
-                tamper_result, risk_result = analyze_security(frame, result, payload)
-                cache.store(payload, tamper_result, risk_result)
+                tamper_result, url_result, risk_result = analyze_security(
+                    frame, result, payload
+                )
+                cache.store(payload, tamper_result, url_result, risk_result)
                 newly_analyzed.add(payload)
 
                 if tamper_result is not None:
@@ -970,6 +1060,24 @@ def run_live_scan(
                 else:
                     logger.warning(
                         "[Tamper] %r — analysis unavailable", payload
+                    )
+
+                if url_result is not None:
+                    print(
+                        f"[URL] {url_result.recommendation} "
+                        f"(score={url_result.risk_score})"
+                    )
+                    logger.info(
+                        "[URL] %r — %s (score=%d, confidence=%.1f%%)",
+                        payload,
+                        url_result.recommendation,
+                        url_result.risk_score,
+                        url_result.confidence,
+                    )
+                else:
+                    print("[URL] unavailable")
+                    logger.warning(
+                        "[URL] %r — analysis unavailable", payload
                     )
 
                 if risk_result is not None:

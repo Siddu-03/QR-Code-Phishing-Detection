@@ -7,8 +7,9 @@ Project: Computer Vision-Based Graphic Tamper Detection for QR Code Phishing Pre
 Orchestrates the full detection pipeline:
 
     Image Input → Load → Validate → Preprocess → QR Enhancement
-                → Detect QR → Tamper Analysis → Risk Assessment
-                → Report Generation → Visualise → Save → Summary
+                → Detect QR → Tamper Analysis → URL Analysis
+                → Risk Assessment → Report Generation → Visualise
+                → Save → Summary
 
 Pipeline steps
 --------------
@@ -23,29 +24,34 @@ Pipeline steps
 4. Tamper Analysis: run TamperDetector.analyze() on the ORIGINAL
    (un-preprocessed) BGR image — never the denoised/normalised copy —
    so that overlay/edge/pattern cues are not smoothed away. (Week 3)
-5. Risk Assessment: run RiskEngine.assess() using both the QR
+5. URL Analysis: run URLAnalyzer.analyze() on the decoded QR payload,
+   when QR Detection produced one; all URL scoring/rule logic lives
+   inside the URL Analyzer module itself. (Week 4)
+6. Risk Assessment: run RiskEngine.assess() using the QR
    DetectionResult and the TamperResult; all weighting/scoring logic
-   lives inside RiskEngine. (Week 3)
-6. Report Generation: assemble a unified Report via ReportGenerator,
-   combining DetectionResult, TamperResult and RiskResult. (Week 3)
-7. Visualise: draw bounding boxes on the original source image.
-8. Print summary.
+   lives inside RiskEngine. The URL Analysis result, when available, is
+   attached as read-only context via ``extra_metadata`` — RiskEngine's
+   own component-weight combination logic is untouched and not
+   duplicated here. (Week 3 + Week 4)
+7. Report Generation: assemble a unified Report via ReportGenerator,
+   combining DetectionResult, TamperResult, RiskResult and the URL
+   Analysis result. (Week 3 + Week 4)
+8. Visualise: draw bounding boxes on the original source image.
+9. Print summary.
 
-Week 4 forward-compatibility
------------------------------
-The future pipeline will become:
-
-    Image Loader → Preprocessing → QR Detection → Tamper Analysis
-                 → URL Analysis → Risk Assessment → Report Generation
-                 → Visualisation → Summary
-
-The insertion point for the Week 4 URL Analyzer is documented at the
-``# FUTURE-URL`` markers around ``step_risk_assessment`` and
-``run_pipeline`` below: URL analysis will run immediately after Tamper
-Analysis and its result will be threaded into ``RiskEngine.assess()``
-and ``ReportGenerator.generate()`` alongside the existing arguments.
-URL Analysis and the Evaluation Framework are explicitly OUT OF SCOPE
-for this Week 3 integration.
+Week 4 integration notes
+-------------------------
+URL Analysis now runs immediately after Tamper Analysis, at the spot
+previously documented with ``# FUTURE-URL`` markers. Its result (a
+``URLResult``) is threaded into ``RiskEngine.assess()`` via
+``extra_metadata`` — because ``RiskEngine``'s own ``url_analysis``
+component weight remains reserved at ``0.0`` (see
+``risk_engine.RiskEngineConfig``), so no risk-scoring logic is
+duplicated in this file — and into ``ReportGenerator.generate()`` via
+its existing ``url_analysis_result`` parameter. URL Analysis is an
+independently-recoverable stage, like Tamper Analysis: a failure never
+terminates the pipeline. The Evaluation Framework remains OUT OF SCOPE
+for this integration.
 
 Exit codes
 ----------
@@ -138,6 +144,16 @@ from src.risk_assessment.risk_result import RiskResult
 # ``src.risk_assessment``. If your repository places it elsewhere, this is
 # the only import line that needs to change.
 from src.reporting.report_generator import Report, generate_report
+
+# URL Analyzer (Week 4)
+# NOTE: url_analyzer.py's own package location was likewise not specified.
+# It is assumed to live alongside its sibling packages as ``src.url_analyzer``,
+# consistent with ``src.tamper_analysis.tamper_detector`` / ``tamper_result``
+# and ``src.risk_assessment.risk_engine`` / ``risk_result``. If your
+# repository places it elsewhere, this is the only import line that needs
+# to change.
+from src.url_analyzer.url_analyzer import URLAnalyzer
+from src.url_analyzer.url_result import URLResult
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -359,21 +375,95 @@ def step_tamper_analysis(image: "np.ndarray") -> TamperResult:
     return tamper_result
 
 
+def _extract_decoded_payload(detection_result: dict) -> Optional[str]:
+    """Return the first non-empty decoded QR payload, or ``None``.
+
+    A single image can contain multiple detected QR codes; the URL
+    Analyzer's public API (:meth:`URLAnalyzer.analyze`) takes one URL
+    string at a time, so this helper picks the first detection whose
+    ``"data"`` field is non-empty to hand to Week 4's URL Analysis stage.
+
+    Parameters
+    ----------
+    detection_result : dict
+        ``DetectionResult`` produced by :func:`step_detect_qr` /
+        :func:`remap_to_original`.
+
+    Returns
+    -------
+    str or None
+        The first non-empty decoded payload, or ``None`` if there are no
+        detections or none of them decoded to non-empty data.
+    """
+    for det in detection_result.get("detections", []):
+        data = det.get("data")
+        if data:
+            return data
+    return None
+
+
+def step_url_analysis(detection_result: dict) -> Optional[URLResult]:
+    """Step 5 — Analyse the decoded QR payload via the URL Analyzer. (Week 4)
+
+    Runs only when QR Detection produced a non-empty decoded payload (see
+    :func:`_extract_decoded_payload`); all URL parsing, scoring and rule
+    evaluation lives inside :class:`~src.url_analyzer.url_analyzer.URLAnalyzer`
+    — nothing is duplicated here.
+
+    Parameters
+    ----------
+    detection_result : dict
+        ``DetectionResult`` produced by :func:`step_detect_qr` /
+        :func:`remap_to_original`.
+
+    Returns
+    -------
+    URLResult or None
+        The URL Analyzer's result, or ``None`` when there is no decoded
+        payload to analyse.
+
+    Raises
+    ------
+    Exception
+        Propagated from :meth:`URLAnalyzer.analyze`. The caller
+        (``run_pipeline``) treats URL Analysis as an independently
+        recoverable stage — on failure, ``url_result`` stays ``None`` and
+        the pipeline continues, exactly like Tamper Analysis.
+    """
+    payload = _extract_decoded_payload(detection_result)
+    if payload is None:
+        logger.info("URL Analysis skipped — no decoded QR payload available.")
+        return None
+
+    logger.info("Running URL analysis on decoded QR payload.")
+    analyzer = URLAnalyzer()
+    url_result = analyzer.analyze(payload)
+    logger.info(
+        "URL analysis complete — recommendation=%s score=%d confidence=%.2f%%",
+        url_result.recommendation,
+        url_result.risk_score,
+        url_result.confidence,
+    )
+    return url_result
+
+
 def step_risk_assessment(
     detection_result: dict,
     tamper_result: Optional[TamperResult],
+    url_result: Optional[URLResult] = None,
 ) -> RiskResult:
-    """Step 5 — Assess overall risk via RiskEngine.
+    """Step 6 — Assess overall risk via RiskEngine.
 
     All weighting and classification logic lives inside
     :class:`~src.risk_assessment.risk_engine.RiskEngine`; this helper only
     orchestrates the call — no risk calculation is duplicated here.
 
-    # FUTURE-URL: Week 4 will add a `url_result` parameter here (and a
-    # matching `url_result` keyword forwarded to `RiskEngine.assess()`)
-    # once the URL Analyzer and the corresponding RiskEngine component
-    # weight are implemented. No other change to this function's shape
-    # should be required.
+    ``url_result``, when available, is attached as read-only context via
+    ``extra_metadata`` rather than fed into scoring: ``RiskEngine``'s own
+    ``component_weights["url_analysis"]`` remains reserved at ``0.0`` (see
+    ``RiskEngineConfig``), so URL Analysis does not influence
+    ``RiskResult.score`` until that weight is intentionally activated
+    inside ``risk_engine.py`` itself — this integration does not touch it.
 
     Parameters
     ----------
@@ -384,6 +474,12 @@ def step_risk_assessment(
         Result of :func:`step_tamper_analysis`. May be ``None`` if that
         stage failed; ``RiskEngine.assess()`` falls back to QR-only
         scoring in that case.
+    url_result : URLResult, optional
+        Result of :func:`step_url_analysis`. May be ``None`` if that stage
+        failed or was skipped (no decoded payload). When present, its
+        ``to_dict()`` is merged into ``RiskResult.metadata["url_analysis"]``
+        via ``extra_metadata`` — a key that does not clash with any of
+        ``RiskEngine.assess()``'s reserved metadata keys.
 
     Returns
     -------
@@ -395,9 +491,13 @@ def step_risk_assessment(
     """
     logger.info("Running risk assessment.")
     engine = create_default_engine()
+    extra_metadata = (
+        {"url_analysis": url_result.to_dict()} if url_result is not None else None
+    )
     risk_result = engine.assess(
         detection_result=detection_result,
         tamper_result=tamper_result,
+        extra_metadata=extra_metadata,
     )
     logger.info(
         "Risk assessment complete — level=%s score=%.4f confidence=%.1f%%",
@@ -414,10 +514,12 @@ def step_generate_report(
     risk_result: RiskResult,
     load_result: dict,
     processing_stats: dict,
+    url_result: Optional[URLResult] = None,
 ) -> Report:
-    """Step 6 — Assemble the unified Report via ReportGenerator.
+    """Step 7 — Assemble the unified Report via ReportGenerator.
 
-    Passes ``DetectionResult``, ``TamperResult`` and ``RiskResult`` into
+    Passes ``DetectionResult``, ``TamperResult``, ``RiskResult`` and (when
+    available) the URL Analysis result into
     :func:`~src.reporting.report_generator.generate_report`; no report
     formatting or status derivation is duplicated in main.py.
 
@@ -438,6 +540,14 @@ def step_generate_report(
         Free-form timing dict (e.g. ``preprocessing_time_ms``,
         ``qr_detection_time_ms``) merged into the report's processing
         statistics.
+    url_result : URLResult, optional
+        Result of :func:`step_url_analysis`. ``ReportGenerator.generate()``
+        requires its ``url_analysis_result`` argument to be a
+        ``Mapping[str, Any]`` (it calls ``dict(...)`` on it internally),
+        so ``url_result.to_dict()`` is passed rather than the raw
+        dataclass instance. When ``None``, ``ReportGenerator`` fills in
+        its own "not yet available" placeholder section — nothing extra
+        is done here.
 
     Returns
     -------
@@ -458,6 +568,7 @@ def step_generate_report(
         qr_detection_result=detection_result,
         image_info=load_result,
         processing_stats=processing_stats,
+        url_analysis_result=url_result.to_dict() if url_result is not None else None,
     )
     logger.info("Report generated — id=%s status=%s", report.report_id, report.overall_status)
     return report
@@ -468,7 +579,7 @@ def step_visualise(
     detection_result: dict,
     output_path: str,
 ) -> None:
-    """Step 4 — Annotate the original source image with bounding boxes.
+    """Step 8 — Annotate the original source image with bounding boxes.
 
     Reads the original (un-preprocessed) source image and draws boxes using
     the detection coordinates.  This is safe because resize was disabled in
@@ -558,16 +669,18 @@ def print_summary(
     output_path: str,
     elapsed_sec: float,
     tamper_result: Optional[TamperResult] = None,
+    url_result: Optional[URLResult] = None,
     risk_result: Optional[RiskResult] = None,
     report: Optional[Report] = None,
     report_path: Optional[str] = None,
 ) -> None:
     """Print a human-readable pipeline summary to stdout.
 
-    The Tamper Analysis, Risk Assessment, and Report Generation sections
-    are printed only when the corresponding stage produced a result — each
-    is independently optional so this summary degrades gracefully if any
-    Week 3 stage failed upstream.
+    The Tamper Analysis, URL Analysis, Risk Assessment, and Report
+    Generation sections are printed only when the corresponding stage
+    produced a result — each is independently optional so this summary
+    degrades gracefully if any stage failed or (for URL Analysis) was
+    skipped upstream.
     """
     print(f"\n{SEPARATOR}")
     print("  QR Code Tamper Detection — Pipeline Summary")
@@ -607,6 +720,22 @@ def print_summary(
                 print(f"    - {reason}")
     else:
         print("  ⚠  Tamper analysis unavailable (stage failed; see log).")
+
+    # ── URL Analysis (Week 4) ─────────────────────────────────────────────
+    print(f"\n{SEPARATOR}")
+    print("  URL Analysis")
+    print(SEPARATOR)
+    if url_result is not None:
+        print(f"  Analyzed URL      : {url_result.url}")
+        print(f"  URL risk score    : {url_result.risk_score}/100")
+        print(f"  URL confidence    : {url_result.confidence:.2f}%")
+        print(f"  Recommendation    : {url_result.recommendation}")
+        if url_result.flags:
+            print("  Flags:")
+            for flag in url_result.flags:
+                print(f"    - {flag}")
+    else:
+        print("  ⚠  URL analysis unavailable (no decoded payload, or stage failed; see log).")
 
     # ── Risk Assessment (Week 3) ─────────────────────────────────────────
     print(f"\n{SEPARATOR}")
@@ -652,36 +781,44 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
     2. Preprocess           (image_enhancement — denoise + brightness, no resize)
     3. Detect QR codes      (qr_detector — runs on preprocessed temp file)
     4. Tamper Analysis      (TamperDetector — runs on the ORIGINAL image; Week 3)
-    5. Risk Assessment      (RiskEngine — consumes DetectionResult + TamperResult; Week 3)
-    6. Report Generation    (ReportGenerator — consumes DetectionResult + TamperResult
-                             + RiskResult; Week 3)
-    7. Visualise            (draws on original source image using raw coordinates)
-    8. Print summary
+    5. URL Analysis         (URLAnalyzer — runs on the decoded QR payload, if any; Week 4)
+    6. Risk Assessment      (RiskEngine — consumes DetectionResult + TamperResult,
+                             with the URL Analysis result attached as read-only
+                             extra_metadata; Week 3 + Week 4)
+    7. Report Generation    (ReportGenerator — consumes DetectionResult + TamperResult
+                             + RiskResult + URL Analysis result; Week 3 + Week 4)
+    8. Visualise            (draws on original source image using raw coordinates)
+    9. Print summary
 
-    Coordinates are valid across steps 3–7 because resize is disabled in
+    Coordinates are valid across steps 3–8 because resize is disabled in
     step 2.  If resize is ever re-enabled, :func:`remap_to_original` must
-    be called between steps 3 and 7.
+    be called between steps 3 and 8.
 
-    Independent stage recovery (Week 3)
-    ------------------------------------
-    Steps 4–6 each have their own exception handling and are treated as
+    Independent stage recovery (Week 3 + Week 4)
+    ----------------------------------------------
+    Steps 4–7 each have their own exception handling and are treated as
     *recoverable*, not fatal:
 
     * If Tamper Analysis (step 4) fails, ``tamper_result`` is set to
       ``None`` and the pipeline continues. ``RiskEngine.assess()``
       accepts ``tamper_result=None`` and falls back to QR-only scoring.
-    * If Risk Assessment (step 5) fails, ``risk_result`` is set to
+    * If URL Analysis (step 5) fails — or is skipped because QR Detection
+      produced no decoded payload — ``url_result`` is set to ``None`` and
+      the pipeline continues. Both ``RiskEngine.assess()`` (via
+      ``extra_metadata``) and ``ReportGenerator.generate()`` (via
+      ``url_analysis_result``) accept ``url_result=None``.
+    * If Risk Assessment (step 6) fails, ``risk_result`` is set to
       ``None``; Report Generation is then skipped (it requires a
       ``RiskResult``), but visualisation and the console summary still
       run.
-    * If Report Generation (step 6) fails — or was skipped because
+    * If Report Generation (step 7) fails — or was skipped because
       ``tamper_result`` or ``risk_result`` is unavailable — ``report`` is
       set to ``None``; visualisation and the console summary still run,
       per the work order's requirement that a report failure must not
       block those later steps.
 
-    None of these three stages change the function's exit code on their
-    own; only failures in steps 1–2, 3, or 7 (image loading, preprocessing,
+    None of these four stages change the function's exit code on their
+    own; only failures in steps 1–2, 3, or 8 (image loading, preprocessing,
     QR detection, or visualisation) affect the exit code, preserving the
     original exit-code contract.
 
@@ -712,7 +849,7 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
     print(SEPARATOR)
 
     # ── Step 1: Load image ───────────────────────────────────────────────────
-    print("\n[1/8] Loading image …")
+    print("\n[1/9] Loading image …")
     try:
         load_result = step_load_image(image_path)
     except LoaderFileNotFoundError as exc:
@@ -733,7 +870,7 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
     # ── Step 2: Preprocess ───────────────────────────────────────────────────
     # Load the BGR array once and pass it directly to preprocessing,
     # avoiding a second disk read.
-    print("\n[2/8] Preprocessing image …")
+    print("\n[2/9] Preprocessing image …")
     preprocessed_path: Optional[str] = None
     try:
         bgr = cv2.imread(abs_path)
@@ -757,7 +894,7 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
     )
 
     # ── Step 3: Detect QR codes ──────────────────────────────────────────────
-    print("\n[3/8] Detecting QR codes …")
+    print("\n[3/9] Detecting QR codes …")
     try:
         detection_result = step_detect_qr(preprocessed_path)
     except (FileNotFoundError, ValueError) as exc:
@@ -798,7 +935,7 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
     # `preprocessed_path` — so that denoising never masks tamper cues.
     # Independently recoverable: on failure, tamper_result stays None and
     # the pipeline continues (RiskEngine.assess() supports this).
-    print("\n[4/8] Running tamper analysis …")
+    print("\n[4/9] Running tamper analysis …")
     tamper_result: Optional[TamperResult] = None
     try:
         tamper_result = step_tamper_analysis(bgr)
@@ -811,21 +948,40 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
         print(f"\n  ⚠  Tamper analysis failed, continuing without it: {exc}")
         logger.exception("Recoverable error during tamper analysis.")
 
-    # FUTURE-URL: Week 4's URL Analyzer will run here, immediately after
-    # Tamper Analysis and before Risk Assessment, e.g.:
-    #     url_result = step_url_analysis(detection_result)
-    # and its result will be threaded into step_risk_assessment() and
-    # step_generate_report() alongside tamper_result. Not implemented in
-    # this Week 3 integration.
+    # ── Step 5: URL Analysis (Week 4) ────────────────────────────────────────
+    # Runs on the decoded QR payload (if any), immediately after Tamper
+    # Analysis and before Risk Assessment. Independently recoverable: on
+    # failure — or when there is no decoded payload — url_result stays
+    # None and the pipeline continues (RiskEngine.assess() and
+    # ReportGenerator.generate() both accept url_result=None).
+    print("\n[5/9] Running URL analysis …")
+    url_result: Optional[URLResult] = None
+    try:
+        url_result = step_url_analysis(detection_result)
+        if url_result is not None:
+            print(
+                f"       ✔  URL analysis complete  "
+                f"(recommendation={url_result.recommendation}, "
+                f"score={url_result.risk_score})"
+            )
+        else:
+            print("       ℹ  No decoded QR payload — URL analysis skipped.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n  ⚠  URL analysis failed, continuing without it: {exc}")
+        logger.exception("Recoverable error during URL analysis.")
 
-    # ── Step 5: Risk Assessment (Week 3) ─────────────────────────────────────
-    # Consumes both DetectionResult and TamperResult; RiskEngine performs
-    # all weighting internally — no risk calculation is duplicated here.
+    # ── Step 6: Risk Assessment (Week 3 + Week 4) ────────────────────────────
+    # Consumes DetectionResult and TamperResult; RiskEngine performs all
+    # weighting internally — no risk calculation is duplicated here.
+    # url_result, when available, is attached as read-only context via
+    # extra_metadata (see step_risk_assessment docstring) rather than fed
+    # into scoring, since RiskEngine's url_analysis component weight is
+    # still reserved at 0.0.
     # Independently recoverable: on failure, risk_result stays None.
-    print("\n[5/8] Running risk assessment …")
+    print("\n[6/9] Running risk assessment …")
     risk_result: Optional[RiskResult] = None
     try:
-        risk_result = step_risk_assessment(detection_result, tamper_result)
+        risk_result = step_risk_assessment(detection_result, tamper_result, url_result)
         print(
             f"       ✔  Risk assessment complete  "
             f"(level={risk_result.risk_level.value}, score={risk_result.score:.4f})"
@@ -834,13 +990,14 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
         print(f"\n  ⚠  Risk assessment failed, continuing without it: {exc}")
         logger.exception("Recoverable error during risk assessment.")
 
-    # ── Step 6: Report Generation (Week 3) ───────────────────────────────────
-    # Consumes DetectionResult, TamperResult and RiskResult; no report
-    # formatting is duplicated here. Requires both tamper_result and
-    # risk_result — if either is unavailable, generation is skipped rather
-    # than fed partial/invalid data, and the pipeline still continues on to
+    # ── Step 7: Report Generation (Week 3 + Week 4) ──────────────────────────
+    # Consumes DetectionResult, TamperResult, RiskResult and (when
+    # available) the URL Analysis result; no report formatting is
+    # duplicated here. Requires both tamper_result and risk_result — if
+    # either is unavailable, generation is skipped rather than fed
+    # partial/invalid data, and the pipeline still continues on to
     # visualisation and the console summary.
-    print("\n[6/8] Generating report …")
+    print("\n[7/9] Generating report …")
     report: Optional[Report] = None
     report_path: Optional[str] = None
     if tamper_result is None or risk_result is None:
@@ -857,6 +1014,7 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
                     "preprocessing_time_ms": prep_result.elapsed_ms,
                     "total_pipeline_time_ms": elapsed_so_far_ms,
                 },
+                url_result=url_result,
             )
             stem = Path(image_path).stem
             report_path = str(DEFAULT_OUTPUT_DIR / f"report_{stem}.json")
@@ -870,10 +1028,10 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
             report = None
             report_path = None
 
-    # ── Step 7: Visualise detections ─────────────────────────────────────────
+    # ── Step 8: Visualise detections ─────────────────────────────────────────
     # Draws on abs_path (original source image).  Coordinates are valid
     # because no resize was applied (spatial_params is empty).
-    print("\n[7/8] Generating annotated image …")
+    print("\n[8/9] Generating annotated image …")
     try:
         step_visualise(abs_path, detection_result, output_path)
     except RuntimeError as exc:
@@ -889,13 +1047,14 @@ def run_pipeline(image_path: str, output_path: Optional[str] = None) -> int:
 
     print(f"       ✔  Output image saved → {output_path}")
 
-    # ── Step 8: Print summary ────────────────────────────────────────────────
-    print("\n[8/8] Generating detection summary …")
+    # ── Step 9: Print summary ────────────────────────────────────────────────
+    print("\n[9/9] Generating detection summary …")
     elapsed = time.perf_counter() - start_time
     print_summary(
         image_path, load_result, prep_result,
         detection_result, output_path, elapsed,
         tamper_result=tamper_result,
+        url_result=url_result,
         risk_result=risk_result,
         report=report,
         report_path=report_path,
