@@ -244,7 +244,8 @@ def generate_markdown_report(
         sections.append("")
         if url_summary_stats:
             sections.append(
-                f"- Average URL risk score: **{url_summary_stats.get('average_risk_score', 0.0):.3f}**"
+                f"- Average URL risk score: "
+                f"**{float(url_summary_stats.get('average_risk_score', 0.0)):.1f}/100**"
             )
             sections.append(
                 f"- Average URL analysis time: "

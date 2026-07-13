@@ -160,7 +160,10 @@ def generate_html_report(
         if url_summary_stats:
             stats_html = (
                 "<div class='cards'>"
-                + _stat_card("Avg URL Risk", f"{url_summary_stats.get('average_risk_score', 0.0):.3f}")
+                + _stat_card(
+                    "Avg URL Risk",
+                    f"{float(url_summary_stats.get('average_risk_score', 0.0)):.1f}/100",
+                )
                 + _stat_card(
                     "Avg Analysis Time", f"{url_summary_stats.get('average_analysis_time_ms', 0.0):.2f} ms"
                 )
