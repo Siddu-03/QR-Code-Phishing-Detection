@@ -9,6 +9,9 @@ from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+APP_VERSION = "1.0.0"
+
+
 class Settings(BaseSettings):
     # App
     APP_NAME: str = "QR Shield API"
@@ -24,6 +27,13 @@ class Settings(BaseSettings):
     API_KEY: str = "change-me-in-production"
     SECRET_KEY: str = "change-me-to-a-random-secret"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    # Authentication must be explicitly disabled; it is never silently
+    # bypassed just because APP_ENV=="development". Only set this to
+    # true in a local/dev environment that is not internet-reachable.
+    AUTH_DISABLED: bool = False
+
+    # Upload / decoded-image safety limits (Change 12 - security hardening)
+    MAX_IMAGE_DIMENSION_PX: int = 6000
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"

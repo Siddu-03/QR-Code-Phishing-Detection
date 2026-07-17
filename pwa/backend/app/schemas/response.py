@@ -30,6 +30,40 @@ class TamperResult(BaseModel):
     threshold: float
     detectors: List[DetectorScore]
     reasons: List[str] = Field(default_factory=list)
+    engine: str = Field(
+        ..., description="Fully-qualified name of the QR Shield engine component that produced this result"
+    )
+
+
+class URLAnalysisResult(BaseModel):
+    """
+    Populated once the backend is wired to src/url_analysis. Optional/None
+    until that integration lands - see Change 2/3 of the backend audit.
+    """
+    analyzed: bool = False
+    url: Optional[str] = None
+    is_suspicious: Optional[bool] = None
+    reasons: List[str] = Field(default_factory=list)
+
+
+class RiskAssessmentResult(BaseModel):
+    """
+    Populated once the backend is wired to src/risk_assessment. Optional/
+    None until that integration lands - see Change 2/3 of the backend audit.
+    """
+    assessed: bool = False
+    risk_level: Optional[str] = Field(default=None, description="e.g. low, medium, high, critical")
+    score: Optional[float] = None
+    recommendation: Optional[str] = None
+
+
+class ProcessingTimes(BaseModel):
+    qr_detection_ms: Optional[float] = None
+    tamper_analysis_ms: Optional[float] = None
+    url_analysis_ms: Optional[float] = None
+    risk_assessment_ms: Optional[float] = None
+    report_generation_ms: Optional[float] = None
+    total_ms: Optional[float] = None
 
 
 class QRDecodeResult(BaseModel):
@@ -45,7 +79,16 @@ class ScanResponse(BaseModel):
     scanned_at: datetime
     qr: QRDecodeResult
     tamper: TamperResult
+    url_analysis: URLAnalysisResult = Field(default_factory=URLAnalysisResult)
+    risk_assessment: RiskAssessmentResult = Field(default_factory=RiskAssessmentResult)
     verdict: str = Field(..., description="One of: safe, suspicious, tampered, no_qr_found")
+    recommendation: Optional[str] = Field(
+        default=None, description="Human-readable recommendation for the end user"
+    )
+    confidence: float = Field(
+        default=0.0, description="Top-level overall confidence surfaced for the frontend, 0-1"
+    )
+    processing_times: ProcessingTimes = Field(default_factory=ProcessingTimes)
 
 
 class ScanHistoryItem(BaseModel):
