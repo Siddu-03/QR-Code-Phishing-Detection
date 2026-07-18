@@ -1,81 +1,65 @@
-"""
-Scan endpoint: accepts an uploaded QR-code image, decodes it, runs the
-weighted tamper-detection pipeline, stores the result in history, and
-returns a structured verdict to the frontend.
-"""
-from datetime import datetime
-
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
-
-from app.core.logger import get_logger
-from app.core.security import verify_api_key
-from app.models import history_store
-from app.schemas.response import ScanResponse
-from app.services.qr_service import qr_service
-from app.utils.helpers import (
-    bytes_to_cv2_image,
-    generate_id,
-    save_upload_copy,
-    validate_and_read_upload,
-)
-
-router = APIRouter()
-logger = get_logger(__name__)
+import pytest
 
 
-def _determine_verdict(qr_decoded: bool, is_tampered: bool, confidence: float, threshold: float) -> str:
-    if not qr_decoded:
-        return "no_qr_found"
-    if is_tampered:
-        return "tampered"
-    if confidence >= threshold * 0.7:
-        return "suspicious"
-    return "safe"
-
-
-@router.post(
-    "",
-    response_model=ScanResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Scan a QR code image for tampering",
-)
-async def scan_qr_image(
-    file: UploadFile = File(..., description="QR code image (png/jpg/webp)"),
-    edge_weight: float = Form(default=0.35, ge=0, le=1),
-    contour_weight: float = Form(default=0.35, ge=0, le=1),
-    overlay_weight: float = Form(default=0.30, ge=0, le=1),
-    tamper_threshold: float = Form(default=0.5, ge=0, le=1),
-    _api_key: str = Depends(verify_api_key),
-) -> ScanResponse:
-    contents = await validate_and_read_upload(file)
-    image = bytes_to_cv2_image(contents)
-
-    scan_id = generate_id("scan")
-    save_upload_copy(contents, file.filename or "upload.png", scan_id)
-
-    qr_result = qr_service.decode_qr(image)
-    tamper_result = qr_service.analyze_tamper(
-        image,
-        edge_weight=edge_weight,
-        contour_weight=contour_weight,
-        overlay_weight=overlay_weight,
-        threshold=tamper_threshold,
+def test_scan_requires_auth(client, sample_qr_image_bytes):
+    response = client.post(
+        "/api/v1/scan",
+        files={"file": ("qr.png", sample_qr_image_bytes, "image/png")},
     )
+    assert response.status_code == 401
 
-    verdict = _determine_verdict(
-        qr_result.decoded, tamper_result.is_tampered, tamper_result.confidence, tamper_threshold
+
+def test_scan_rejects_unsupported_content_type(client, auth_headers):
+    response = client.post(
+        "/api/v1/scan",
+        headers=auth_headers,
+        files={"file": ("not_an_image.txt", b"hello world", "text/plain")},
     )
+    assert response.status_code == 400
 
-    response = ScanResponse(
-        scan_id=scan_id,
-        filename=file.filename or "upload.png",
-        scanned_at=datetime.utcnow(),
-        qr=qr_result,
-        tamper=tamper_result,
-        verdict=verdict,
+
+def test_scan_rejects_mislabeled_file(client, auth_headers):
+    # Declares image/png but the bytes aren't actually a PNG - the
+    # magic-byte sniff in validate_and_read_upload must catch this.
+    response = client.post(
+        "/api/v1/scan",
+        headers=auth_headers,
+        files={"file": ("fake.png", b"not really a png", "image/png")},
     )
+    assert response.status_code == 400
 
-    history_store.add(response.model_dump())
-    logger.info("Scan %s completed with verdict=%s confidence=%.3f", scan_id, verdict, tamper_result.confidence)
 
-    return response
+def test_scan_full_pipeline(client, auth_headers, sample_qr_image_bytes, engine_available):
+    if not engine_available:
+        pytest.skip("QR Shield engine (src.*) not importable in this environment")
+
+    response = client.post(
+        "/api/v1/scan",
+        headers=auth_headers,
+        files={"file": ("qr.png", sample_qr_image_bytes, "image/png")},
+    )
+    assert response.status_code == 201
+
+    body = response.json()
+    assert body["scan_id"].startswith("scan_")
+    assert body["verdict"] in ("safe", "suspicious", "tampered", "no_qr_found")
+
+    # QR Detection stage
+    assert body["qr"]["decoded"] is True
+    assert body["qr"]["data"] == "https://example.com/test-page"
+
+    # Tamper Analysis stage - reused engine, not a duplicate implementation
+    assert body["tamper"]["engine"] == "qr_shield_core.tamper_analysis.TamperDetector"
+
+    # URL Analysis stage (Change 5 - previously always the default/unset placeholder)
+    assert body["url_analysis"]["analyzed"] is True
+    assert body["url_analysis"]["url"] == "https://example.com/test-page"
+
+    # Risk Assessment stage (Change 5 - previously always the default/unset placeholder)
+    assert body["risk_assessment"]["assessed"] is True
+    assert body["risk_assessment"]["risk_level"] in ("SAFE", "SUSPICIOUS", "HIGH_RISK")
+
+    # Top-level fields are now actually populated from the risk engine
+    assert body["recommendation"]
+    assert 0.0 <= body["confidence"] <= 1.0
+    assert body["processing_times"]["total_ms"] > 0

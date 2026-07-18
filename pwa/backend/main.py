@@ -18,8 +18,8 @@ from fastapi.responses import JSONResponse
 from app.api.v1 import api_router
 from app.core.config import APP_VERSION, get_settings
 from app.core.logger import get_logger
+from app.core.qr_shield_engine import QRShieldEngineUnavailable
 from app.middleware.cors import add_cors_middleware
-from app.services.qr_service import QRShieldEngineUnavailable
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -64,7 +64,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(QRShieldEngineUnavailable)
 async def qr_shield_engine_unavailable_handler(request: Request, exc: QRShieldEngineUnavailable):
     """
-    The backend is only a wrapper around the QR Shield engine (Change 1).
+    The backend is only a wrapper around the QR Shield engine.
     When that engine can't be reached, callers get a clear 503 instead
     of a fabricated result from a second implementation.
     """

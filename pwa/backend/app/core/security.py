@@ -4,7 +4,8 @@ write-sensitive endpoints (scan submission, report generation/download).
 """
 import secrets
 
-from fastapi import Header, HTTPException, status
+from fastapi import HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 
 from app.core.config import get_settings
 from app.core.logger import get_logger
@@ -12,8 +13,16 @@ from app.core.logger import get_logger
 settings = get_settings()
 logger = get_logger(__name__)
 
+# Change 7: an APIKeyHeader security scheme (instead of a bare Header())
+# registers with FastAPI's OpenAPI security machinery, so Swagger UI shows
+# an "Authorize" button and marks every endpoint that depends on this as
+# requiring `X-API-Key`. `auto_error=False` preserves the exact previous
+# behaviour of returning our own 401 message when the header is missing,
+# rather than FastAPI's default.
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-async def verify_api_key(x_api_key: str = Header(default=None, alias="X-API-Key")) -> str:
+
+async def verify_api_key(x_api_key: str = Security(api_key_header)) -> str:
     """
     FastAPI dependency that validates the X-API-Key header against the
     configured API_KEY.

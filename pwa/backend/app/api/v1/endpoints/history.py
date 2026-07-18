@@ -1,34 +1,37 @@
-"""
-History endpoint: lists past scans with pagination and optional
-tampered-only filtering, for the frontend dashboard/history view.
-"""
-from typing import Optional
-
-from fastapi import APIRouter, Query
-
-from app.models import history_store
-from app.schemas.response import HistoryResponse, ScanHistoryItem
-
-router = APIRouter()
+import pytest
 
 
-@router.get("", response_model=HistoryResponse, summary="List scan history")
-async def get_history(
-    limit: int = Query(default=20, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-    tampered_only: Optional[bool] = Query(default=None),
-) -> HistoryResponse:
-    result = history_store.list(limit=limit, offset=offset, tampered_only=tampered_only)
+def test_history_requires_auth(client):
+    # This endpoint had no auth at all before Change 2.
+    response = client.get("/api/v1/history")
+    assert response.status_code == 401
 
-    items = [
-        ScanHistoryItem(
-            scan_id=r["scan_id"],
-            filename=r["filename"],
-            scanned_at=r["scanned_at"],
-            verdict=r["verdict"],
-            confidence=r["tamper"]["confidence"],
-        )
-        for r in result["items"]
-    ]
 
-    return HistoryResponse(total=result["total"], limit=limit, offset=offset, items=items)
+def test_history_rejects_bad_key(client):
+    response = client.get("/api/v1/history", headers={"X-API-Key": "wrong-key"})
+    assert response.status_code == 401
+
+
+def test_history_lists_scans(client, auth_headers, sample_qr_image_bytes, engine_available):
+    if not engine_available:
+        pytest.skip("QR Shield engine (src.*) not importable in this environment")
+
+    scan_response = client.post(
+        "/api/v1/scan",
+        headers=auth_headers,
+        files={"file": ("qr.png", sample_qr_image_bytes, "image/png")},
+    )
+    assert scan_response.status_code == 201
+    scan_id = scan_response.json()["scan_id"]
+
+    history_response = client.get("/api/v1/history", headers=auth_headers)
+    assert history_response.status_code == 200
+
+    body = history_response.json()
+    assert body["total"] >= 1
+    assert any(item["scan_id"] == scan_id for item in body["items"])
+
+
+def test_history_pagination_params_are_validated(client, auth_headers):
+    response = client.get("/api/v1/history", headers=auth_headers, params={"limit": 0})
+    assert response.status_code == 422
