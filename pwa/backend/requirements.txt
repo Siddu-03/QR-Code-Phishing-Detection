@@ -6,6 +6,7 @@ pydantic-settings==2.5.2
 python-dotenv==1.0.1
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
+pyzbar==0.1.9
 reportlab==4.2.5
 pytest==8.3.3
 pytest-asyncio==0.24.0
