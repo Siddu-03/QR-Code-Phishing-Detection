@@ -1,6 +1,0 @@
-2026-07-18 19:38:58 | WARNING  | app.core.qr_shield_engine | QR Shield core path 'C:\Users\SIDDU\Documents\GitHub\QR-Code-Phishing-Detection\pwa\qr_shield_core' does not exist. Engine-backed endpoints will return 503 until QR_SHIELD_CORE_PATH points at a valid QR Shield engine checkout.
-2026-07-18 19:38:58 | WARNING  | app.services.qr_service | qr_shield_core qr_detector/tamper_analysis modules not found (No module named 'src'). The scan endpoint will return 503 until QR_SHIELD_CORE_PATH points at a valid QR Shield engine checkout.
-2026-07-18 19:38:58 | WARNING  | app.services.risk_service | qr_shield_core risk_assessment module not found (No module named 'src'). Risk assessment will be skipped until QR_SHIELD_CORE_PATH points at a valid QR Shield engine checkout.
-2026-07-18 19:38:58 | WARNING  | app.services.url_service | qr_shield_core url_analyzer module not found (No module named 'src'). URL analysis will be skipped until QR_SHIELD_CORE_PATH points at a valid QR Shield engine checkout.
-2026-07-18 19:38:58 | INFO     | main | QR Shield API starting up in 'development' mode
-2026-07-18 19:44:41 | INFO     | main | QR Shield API shutting down
