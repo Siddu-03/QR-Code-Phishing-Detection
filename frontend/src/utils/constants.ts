@@ -1,4 +1,0 @@
-export const APP_NAME = "QR Shield";
-
-export const API_URL =
-  "http://localhost:8000/api/v1";
